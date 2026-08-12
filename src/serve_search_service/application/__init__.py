@@ -1,1 +1,1 @@
-"""Search use cases."""
+"""Application services."""

@@ -1,8 +1,6 @@
-"""Public HTTP response models for search."""
+"""Public HTTP response models — shared across APIs."""
 
-from typing import Any
-
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class ProblemDetail(BaseModel):
@@ -15,19 +13,3 @@ class ProblemDetail(BaseModel):
     code: str
     trace_id: str | None = None
     retryable: bool = False
-
-
-class SearchResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    document_id: str
-    passage_id: str
-    text: str
-    score: float
-    source_uri: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class SearchResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    results: list[SearchResult]
-    trace_id: str | None = None

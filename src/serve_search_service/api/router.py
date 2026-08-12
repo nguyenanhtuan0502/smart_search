@@ -1,21 +1,22 @@
 """Public HTTP routes for the search service."""
 
-from fastapi import APIRouter, Depends, Request, status
+from typing import Any
 
-from ..application.search import SearchService
-from ..contracts import SearchResponse, SearchResult
-from ..domain.ports import TenantResolver
-from ..domain.search import SearchQuery
+from fastapi import APIRouter, Request, status
+
+from ..application.search import HybridSearchService
+from ..logging import TraceIdAdapter, get_logger
 from .errors import ApiError
-from .schemas import SearchRequest
+from .schemas import HybridSearchRequest, HybridSearchResponse
+
+_logger: TraceIdAdapter = get_logger(__name__)
 
 router = APIRouter()
 
 
-def tenant_id(request: Request) -> str:
-    resolver: TenantResolver = request.app.state.tenant_resolver
-    return resolver.resolve(dict(request.headers))
-
+# ─────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────
 
 @router.get("/health/live", tags=["platform"])
 async def live() -> dict[str, str]:
@@ -42,38 +43,46 @@ async def api_root(request: Request) -> dict[str, str]:
     }
 
 
-@router.post("/v1/search", response_model=SearchResponse, tags=["search"])
-async def search(
-    payload: SearchRequest,
-    request: Request,
-    verified_tenant_id: str = Depends(tenant_id),
-) -> SearchResponse:
-    search_service: SearchService | None = request.app.state.search_service
-    if search_service is None:
+# ─────────────────────────────────────────────
+# Search API
+# ─────────────────────────────────────────────
+
+@router.post("/v1/search/hybrid", response_model=HybridSearchResponse, tags=["search"])
+async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> dict[str, Any]:
+    """Hybrid search (Dense + Sparse RRF).
+
+    Caller handles embedding externally — sends dense_vector + sparse_vector.
+    This service queries Qdrant and fuses results.
+    """
+    search_service: HybridSearchService = request.app.state.search_service
+
+    _logger.info(
+        "POST /v1/search/hybrid - collection=%s, limit=%d, has_sparse=%s",
+        payload.collection,
+        payload.limit,
+        payload.sparse_vector is not None,
+    )
+
+    result = await search_service.hybrid_search(
+        collection=payload.collection,
+        dense_vector=payload.dense_vector,
+        sparse_vector=payload.sparse_vector,
+        limit=payload.limit,
+        score_threshold=payload.score_threshold,
+        payload_filter=payload.filter,
+        vector_weight=payload.vector_weight,
+        keyword_weight=payload.keyword_weight,
+        rrf_k=payload.rrf_k,
+        candidate_multiplier=payload.candidate_multiplier,
+        with_payload=payload.with_payload,
+    )
+
+    if result.get("error"):
         raise ApiError(
-            status=status.HTTP_501_NOT_IMPLEMENTED,
-            code="search_not_configured",
-            detail="No retriever adapter is configured.",
+            status=result.get("status", 503),
+            code="search_failed",
+            detail=result.get("detail", "Search failed"),
+            retryable=True,
         )
-    hits = await search_service.search(
-        SearchQuery(
-            tenant_id=verified_tenant_id,
-            text=payload.query,
-            limit=payload.limit,
-            filters=payload.filters,
-        )
-    )
-    return SearchResponse(
-        results=[
-            SearchResult(
-                document_id=hit.document_id,
-                passage_id=hit.passage_id,
-                text=hit.text,
-                score=hit.score,
-                source_uri=hit.source_uri,
-                metadata=dict(hit.metadata),
-            )
-            for hit in hits
-        ],
-        trace_id=request.state.trace_id,
-    )
+
+    return result
