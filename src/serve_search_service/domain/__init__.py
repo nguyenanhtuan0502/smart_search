@@ -1,1 +1,1 @@
-"""Provider-neutral search models and ports."""
+"""Domain models for the search service."""
