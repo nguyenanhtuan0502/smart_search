@@ -19,16 +19,24 @@ class QdrantClient:
 
     def __init__(self, settings: ServiceSettings) -> None:
         self._base_url = settings.qdrant_url
-        headers = {"Content-Type": "application/json"}
+        headers: dict[str, str] = {"Content-Type": "application/json"}
         if settings.qdrant_api_key:
             headers["api-key"] = settings.qdrant_api_key
+
+        _logger.info(
+            "Initializing QdrantClient: base_url=%s, has_api_key=%s",
+            self._base_url, bool(settings.qdrant_api_key),
+        )
 
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers=headers,
-            timeout=15,
+            timeout=30,
             trust_env=False,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
         )
+
+        _logger.info("QdrantClient initialized successfully")
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client (call on app shutdown)."""
@@ -56,16 +64,22 @@ class QdrantClient:
             body["filter"] = payload_filter
 
         url = f"/collections/{collection}/points/search"
+        _logger.info("Dense search: url=%s%s, vector_len=%d", self._base_url, url, len(vector))
 
         try:
             resp = await self._client.post(url, json=body)
+            _logger.info("Dense search response: status=%d", resp.status_code)
             resp.raise_for_status()
         except httpx.TimeoutException:
+            _logger.error("Dense search timeout for collection=%s", collection)
             return {"error": True, "status": 504, "detail": "Qdrant timeout (dense)"}
         except httpx.HTTPError as e:
+            resp_text = resp.text if "resp" in dir() and hasattr(resp, "text") else "N/A"
+            _logger.error("Dense search error: %s, response=%s", e, resp_text[:200])
             return {"error": True, "status": 503, "detail": f"Qdrant error (dense): {e}"}
 
-        return resp.json()
+        result: dict[str, Any] = resp.json()
+        return result
 
     async def sparse_search(
         self,
@@ -86,13 +100,20 @@ class QdrantClient:
             body["filter"] = payload_filter
 
         url = f"/collections/{collection}/points/search"
+        indices_len = len(sparse_vector.get("indices", []))
+        _logger.info("Sparse search: url=%s%s, indices_len=%d", self._base_url, url, indices_len)
 
         try:
             resp = await self._client.post(url, json=body)
+            _logger.info("Sparse search response: status=%d", resp.status_code)
             resp.raise_for_status()
         except httpx.TimeoutException:
+            _logger.error("Sparse search timeout for collection=%s", collection)
             return {"error": True, "status": 504, "detail": "Qdrant timeout (sparse)"}
         except httpx.HTTPError as e:
+            resp_text = resp.text if "resp" in dir() and hasattr(resp, "text") else "N/A"
+            _logger.error("Sparse search error: %s, response=%s", e, resp_text[:200])
             return {"error": True, "status": 503, "detail": f"Qdrant error (sparse): {e}"}
 
-        return resp.json()
+        result: dict[str, Any] = resp.json()
+        return result
