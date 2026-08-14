@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 
 from .adapters import QdrantClient
+from .adapters.embedding import EmbeddingClient
 from .adapters.identity import DevelopmentHeaderTenantResolver
 from .api.errors import ApiError, handle_api_error, handle_validation_error
 from .api.router import router
@@ -31,12 +32,16 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     # Qdrant client (shared, connection reuse)
     qdrant_client = QdrantClient(settings)
 
+    # Embedding client (calls serve-data-processing-service)
+    embedding_client = EmbeddingClient(settings)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             yield
         finally:
             await qdrant_client.aclose()
+            await embedding_client.aclose()
 
     app = FastAPI(
         title="Serve Search Service",
@@ -46,6 +51,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.tenant_resolver = DevelopmentHeaderTenantResolver(settings.dev_tenant_id)
     app.state.qdrant_client = qdrant_client
+    app.state.embedding_client = embedding_client
     app.state.search_service = HybridSearchService(qdrant_client)
 
     app.include_router(router)

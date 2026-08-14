@@ -54,7 +54,13 @@ def rrf_fuse(
 
 
 class HybridSearchService:
-    """Orchestrate hybrid search: dense + sparse → RRF fusion."""
+    """Orchestrate hybrid search: dense + sparse → RRF fusion.
+
+    Supports 3 modes:
+    - dense-only:   only dense_vector provided
+    - keyword-only: only sparse_vector provided
+    - hybrid:       both vectors provided → parallel search + RRF fusion
+    """
 
     def __init__(self, qdrant: QdrantClient) -> None:
         self._qdrant = qdrant
@@ -62,7 +68,7 @@ class HybridSearchService:
     async def hybrid_search(
         self,
         collection: str,
-        dense_vector: list[float],
+        dense_vector: list[float] | None = None,
         sparse_vector: dict[str, Any] | None = None,
         limit: int = 10,
         score_threshold: float | None = None,
@@ -73,11 +79,21 @@ class HybridSearchService:
         candidate_multiplier: int = 5,
         with_payload: bool = True,
     ) -> dict[str, Any]:
-        """Execute hybrid search and return fused results."""
+        """Execute search based on available vectors and return fused results.
+
+        Raises ValueError if neither dense_vector nor sparse_vector is provided.
+        """
+        if dense_vector is None and sparse_vector is None:
+            return {
+                "error": True,
+                "status": 422,
+                "detail": "At least one of dense_vector or sparse_vector must be provided.",
+            }
+
         candidate_limit = min(limit * candidate_multiplier, 100)
 
-        # Dense-only if no sparse vector
-        if sparse_vector is None:
+        # ── Mode 1: Dense-only ──────────────────────────────────
+        if dense_vector is not None and sparse_vector is None:
             result = await self._qdrant.dense_search(
                 collection=collection,
                 vector=dense_vector,
@@ -107,7 +123,40 @@ class HybridSearchService:
                 "mode": "vector_only",
             }
 
-        # Both dense + sparse in parallel
+        # ── Mode 2: Keyword-only (sparse-only) ─────────────────
+        if sparse_vector is not None and dense_vector is None:
+            result = await self._qdrant.sparse_search(
+                collection=collection,
+                sparse_vector=sparse_vector,
+                limit=limit,
+                payload_filter=payload_filter,
+                with_payload=with_payload,
+            )
+            if result.get("error"):
+                return result
+
+            points = result.get("result", [])
+            return {
+                "result": [
+                    {
+                        "id": p["id"],
+                        "payload": p.get("payload"),
+                        "rrf_score": p.get("score", 0),
+                        "vector_rank": None,
+                        "keyword_rank": rank,
+                    }
+                    for rank, p in enumerate(points[:limit], start=1)
+                ],
+                "vector_count": 0,
+                "keyword_count": len(points),
+                "fused_count": min(len(points), limit),
+                "mode": "keyword_only",
+            }
+
+        # ── Mode 3: Hybrid (dense + sparse in parallel) ────────
+        assert dense_vector is not None  # guaranteed by Mode 1/2 checks above
+        assert sparse_vector is not None  # guaranteed by Mode 1/2 checks above
+
         dense_result, sparse_result = await asyncio.gather(
             self._qdrant.dense_search(
                 collection=collection,
@@ -135,6 +184,7 @@ class HybridSearchService:
         dense_points = dense_result.get("result", []) if dense_ok else []
         sparse_points = sparse_result.get("result", []) if sparse_ok else []
 
+        # Graceful degradation: one side failed
         if dense_points and not sparse_points:
             return {
                 "result": [
