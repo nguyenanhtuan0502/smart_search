@@ -35,10 +35,26 @@ stages:
   - deploy
 
 # --- Đóng gói image bằng podman, xuất ra file .tar ---------------------------
+
+# --- Chan nhanh, khong phu thuoc workflow.rules cua repo dung chung ----------
+# `.rules:post-merge` cua genai/iac/gitlab-ci chi kiem tra CI_PIPELINE_SOURCE,
+# viec loc nhanh nam o `workflow.rules` — ma file do ta pin theo ref nen noi dung
+# co the doi ma khong biet. Dinh nghia lai o day de dev push nhanh rieng thi
+# pipeline khong chay, du rule ben kia co noi long den dau.
+.rules:shared-branches:
+  rules:
+    # Push: chi cac nhanh chung.
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(dev|develop|sit|uat|release.*)$/'
+      when: on_success
+    # Web (Run pipeline): cho phep moi nhanh, de con test thu cong.
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      when: on_success
+    - when: never
+
 containerize:build:
   stage: containerize
   extends:
-    - .rules:post-merge
+    - .rules:shared-branches
     - .containerize
     - .profile:genai
   tags:
@@ -83,7 +99,7 @@ export:image-tag:
   tags:
     - podman
   extends:
-    - .rules:post-merge
+    - .rules:shared-branches
     - .profile:genai
   variables:
     GIT_STRATEGY: none
@@ -117,7 +133,7 @@ deliver:upload-image:
   stage: deliver
   extends:
     - .deliver
-    - .rules:post-merge
+    - .rules:shared-branches
     - .profile:genai
   needs: ["containerize:build"]
   dependencies:
@@ -128,7 +144,7 @@ deploy:set-image:
   # Hai pipeline chay song song se tranh nhau `oc set image` -> rollout day nhau.
   resource_group: deploy-$CI_ENVIRONMENT_NAME-serve-search-service
   extends:
-    - .rules:post-merge
+    - .rules:shared-branches
     - .profile:genai
     - .deploy
   variables:
