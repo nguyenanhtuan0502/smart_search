@@ -1,13 +1,7 @@
-"""Document-level reranking service.
-
-Contains both the core reranking algorithms (maxp, top_m_mean, hit_count, rrf, hybrid)
-and the service class that orchestrates chunk→document aggregation.
-"""
-
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from statistics import fmean
 from typing import Any
@@ -21,7 +15,6 @@ from typing import Any
 class ChunkResult:
     """A single chunk search result with its rank and score."""
 
-    query_id: str
     chunk_id: str
     document_id: str
     score: float
@@ -29,7 +22,6 @@ class ChunkResult:
 
 
 Ranking = list[tuple[str, float]]
-Strategy = Callable[[list[ChunkResult]], Ranking]
 Grouped = dict[str, list[ChunkResult]]
 
 
@@ -83,8 +75,8 @@ def _hit_count(grouped: Grouped) -> Ranking:
 
 def _rrf(grouped: Grouped, k: int = 60) -> Ranking:
     """Score = sum of 1/(k + rank) for each chunk per document."""
-    if k < 0:
-        raise ValueError("k must be >= 0")
+    if k < 1:
+        raise ValueError("k must be >= 1")
     return _sorted({doc: sum(1 / (k + c.rank) for c in chunks) for doc, chunks in grouped.items()})
 
 
@@ -164,6 +156,9 @@ class RerankService:
         if not chunk_results:
             return []
 
+        if top_chunks < 1:
+            raise ValueError("top_chunks must be >= 1")
+
         # Build ChunkResult list
         chunk_result_items = self._build_chunk_results(chunk_results, document_id_field)
 
@@ -186,17 +181,25 @@ class RerankService:
         chunk_results: list[dict[str, Any]],
         document_id_field: str,
     ) -> list[ChunkResult]:
-        """Convert raw chunk dicts to ChunkResult dataclass instances."""
+        """Convert raw chunk dicts to ChunkResult dataclass instances.
+
+        Raises ValueError if a chunk is missing the document_id_field in its payload.
+        """
         items: list[ChunkResult] = []
         for rank, item in enumerate(chunk_results, start=1):
             payload = item.get("payload") or {}
-            document_id = str(payload.get(document_id_field, item.get("id", "")))
+            document_id_value = payload.get(document_id_field)
+            if document_id_value is None:
+                raise ValueError(
+                    f"Missing '{document_id_field}' in chunk payload for chunk "
+                    f"{item.get('id', '<unknown>')}. "
+                    f"Reranking requires every chunk to have a document identifier."
+                )
             items.append(
                 ChunkResult(
-                    query_id="q",
                     chunk_id=str(item.get("id", "")),
-                    document_id=document_id,
-                    score=item.get("rrf_score", 0.0),
+                    document_id=str(document_id_value),
+                    score=item.get("score", 0.0),
                     rank=rank,
                 )
             )
@@ -211,18 +214,22 @@ class RerankService:
         mean_m: int,
         rrf_k: int,
     ) -> Ranking:
-        """Dispatch to the correct reranking strategy."""
+        """Dispatch to the correct reranking strategy.
+
+        Raises ValueError for unsupported strategies.
+        """
         if strategy == "maxp":
             return maxp_rerank(items)
-        elif strategy == "top_m_mean":
+        if strategy == "top_m_mean":
             return top_m_mean_rerank(items, m=mean_m)
-        elif strategy == "hit_count":
+        if strategy == "hit_count":
             return hit_count_rerank(items)
-        elif strategy == "rrf":
+        if strategy == "rrf":
             return rrf_rerank(items, k=rrf_k)
-        else:  # hybrid (default)
+        if strategy == "hybrid":
             w = weights or (0.40, 0.25, 0.15, 0.20)
             return hybrid_rerank(items, weights=w, mean_m=mean_m, rrf_k=rrf_k)
+        raise ValueError(f"Unsupported rerank strategy: {strategy!r}")
 
     def _build_document_results(
         self,
@@ -235,14 +242,14 @@ class RerankService:
         doc_chunks: dict[str, list[dict[str, Any]]] = {}
         for item in chunk_results:
             payload = item.get("payload") or {}
-            document_id = str(payload.get(document_id_field, item.get("id", "")))
+            document_id = str(payload.get(document_id_field, ""))
             doc_chunks.setdefault(document_id, []).append(item)
 
         document_results: list[dict[str, Any]] = []
         for doc_id, doc_score in ranking:
             chunks = doc_chunks.get(doc_id, [])
             chunks_sorted = sorted(
-                chunks, key=lambda c: c.get("rrf_score", 0), reverse=True
+                chunks, key=lambda c: c.get("score", 0), reverse=True
             )
             document_results.append({
                 "document_id": doc_id,
@@ -251,7 +258,8 @@ class RerankService:
                     {
                         "chunk_id": str(c.get("id", "")),
                         "payload": c.get("payload"),
-                        "rrf_score": c.get("rrf_score", 0.0),
+                        "score": c.get("score", 0.0),
+                        "score_type": c.get("score_type", "rrf"),
                         "vector_rank": c.get("vector_rank"),
                         "keyword_rank": c.get("keyword_rank"),
                     }

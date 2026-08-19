@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 
 from .adapters import QdrantClient
-from .adapters.embedding import EmbeddingClient
+from .adapters.call_embedding import EmbeddingClient
 from .adapters.identity import DevelopmentHeaderTenantResolver
 from .api.errors import ApiError, handle_api_error, handle_validation_error
 from .api.router import router

@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ─────────────────────────────────────────────
 # Rerank Options
@@ -30,7 +30,7 @@ class RerankOptions(BaseModel):
         ),
     )
     mean_m: int = Field(default=3, ge=1, description="Top M chunks for top_m_mean strategy")
-    rrf_k: int = Field(default=60, ge=0, description="RRF k constant for rrf/hybrid strategy")
+    rrf_k: int = Field(default=60, ge=1, description="RRF k constant for rrf/hybrid strategy")
     document_id_field: str = Field(
         default="document_id",
         description="Payload field name that identifies the parent document",
@@ -41,6 +41,21 @@ class RerankOptions(BaseModel):
         le=20,
         description="Number of top chunks to include per document in reranked result",
     )
+
+    @model_validator(mode="after")
+    def validate_weights(self) -> "RerankOptions":
+        """Validate weights when strategy is hybrid."""
+        if self.weights is not None:
+            if any(w < 0 for w in self.weights):
+                raise ValueError("All weights must be non-negative.")
+            if abs(sum(self.weights) - 1.0) > 1e-6:
+                raise ValueError(
+                    f"Weights must sum to 1.0, got {sum(self.weights):.6f}."
+                )
+        elif self.strategy == "hybrid":
+            # Use default weights — no validation needed
+            pass
+        return self
 
 
 # ─────────────────────────────────────────────
@@ -74,6 +89,13 @@ class HybridSearchRequest(BaseModel):
     rrf_k: int = Field(default=60, ge=1, le=200)
     candidate_multiplier: int = Field(default=5, ge=2, le=20)
     with_payload: bool = True
+
+    @model_validator(mode="after")
+    def validate_weights_not_both_zero(self) -> "HybridSearchRequest":
+        """At least one of vector_weight or keyword_weight must be > 0."""
+        if self.vector_weight == 0 and self.keyword_weight == 0:
+            raise ValueError("At least one of vector_weight or keyword_weight must be greater than 0.")
+        return self
     rerank: RerankOptions | None = Field(
         default=None,
         description=(
@@ -89,11 +111,15 @@ class HybridSearchRequest(BaseModel):
 
 
 class ChunkResultItem(BaseModel):
-    """A single chunk result from RRF fusion (when rerank is NOT requested)."""
+    """A single chunk result from search (RRF fusion or single-mode)."""
 
     id: Any
     payload: dict[str, Any] | None = None
-    rrf_score: float
+    score: float = Field(description="RRF score (hybrid) or similarity/keyword score (single-mode)")
+    score_type: Literal["rrf", "similarity", "keyword"] = Field(
+        default="rrf",
+        description="Type of score: 'rrf' for fused, 'similarity' for dense, 'keyword' for sparse",
+    )
     vector_rank: int | None = None
     keyword_rank: int | None = None
 
@@ -108,7 +134,8 @@ class DocumentChunkItem(BaseModel):
 
     chunk_id: str
     payload: dict[str, Any] | None = None
-    rrf_score: float
+    score: float = Field(description="RRF score or similarity/keyword score of this chunk")
+    score_type: Literal["rrf", "similarity", "keyword"] = "rrf"
     vector_rank: int | None = None
     keyword_rank: int | None = None
 
@@ -119,7 +146,7 @@ class DocumentResultItem(BaseModel):
     document_id: str
     score: float = Field(description="Document relevance score from rerank strategy")
     chunks: list[DocumentChunkItem] = Field(
-        description="Top chunks for this document, sorted by rrf_score desc"
+        description="Top chunks for this document, sorted by score desc"
     )
 
 
@@ -132,9 +159,11 @@ class HybridSearchResponse(BaseModel):
     """Hybrid search response.
 
     mode values:
-    - "hybrid": both dense + sparse, chunk-level result
-    - "vector_only": dense-only search, chunk-level result
-    - "keyword_only": sparse-only search, chunk-level result
+    - "hybrid": both dense + sparse succeeded, chunk-level RRF result
+    - "vector_only": dense-only search (sparse not provided), chunk-level result
+    - "keyword_only": sparse-only search (dense not provided), chunk-level result
+    - "vector_only_fallback": sparse search failed, fallback to dense results
+    - "keyword_only_fallback": dense search failed, fallback to sparse results
     - "hybrid_reranked": rerank applied, document-level result
     """
 
@@ -142,4 +171,11 @@ class HybridSearchResponse(BaseModel):
     vector_count: int = 0
     keyword_count: int = 0
     fused_count: int = 0
-    mode: Literal["hybrid", "vector_only", "keyword_only", "hybrid_reranked"] = "hybrid"
+    mode: Literal[
+        "hybrid",
+        "vector_only",
+        "keyword_only",
+        "vector_only_fallback",
+        "keyword_only_fallback",
+        "hybrid_reranked",
+    ] = "hybrid"
