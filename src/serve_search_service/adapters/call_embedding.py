@@ -1,6 +1,7 @@
 """Embedding adapter — HTTP client to call embedding API (serve-data-processing-service).
 
 Converts query text into dense + sparse vectors for hybrid search.
+Uses POST /v1/query-embeddings (synchronous, query-side embedding).
 """
 
 from typing import Any
@@ -20,7 +21,8 @@ class EmbeddingError(Exception):
 class EmbeddingClient:
     """Async HTTP client for the embedding service.
 
-    Calls POST /v1/embeddings to get dense + sparse vectors from text.
+    Calls POST /v1/query-embeddings to get dense + sparse vectors from query text.
+    This is the query-side embedding (search), NOT the ingest-side (/v1/embeddings).
     """
 
     def __init__(self, settings: ServiceSettings) -> None:
@@ -43,33 +45,19 @@ class EmbeddingClient:
         _logger.info("EmbeddingClient closed")
 
     async def embed_query(self, text: str) -> dict[str, Any]:
-        """Embed a query text and return dense + sparse vectors.
 
-        Args:
-            text: The query string to embed.
-
-        Returns:
-            {
-                "embedding": [float...],
-                "sparse_embedding": {"indices": [...], "values": [...]}
-            }
-
-        Raises:
-            EmbeddingError: If the embedding API call fails.
-        """
-        body = {
-            "input": text,
+        body: dict[str, Any] = {
+            "query": text,
             "model": self._model,
-            "input_type": "query",
         }
 
         _logger.info(
-            "Embedding request: url=%s/v1/embeddings, model=%s, text_len=%d",
+            "Embedding request: url=%s/v1/query-embeddings, model=%s, text_len=%d",
             self._base_url, self._model, len(text),
         )
 
         try:
-            resp = await self._client.post("/v1/embeddings", json=body)
+            resp = await self._client.post("/v1/query-embeddings", json=body)
         except httpx.TimeoutException as e:
             _logger.error("Embedding API timeout: %s", e)
             raise EmbeddingError(f"Embedding API timeout after 60s: {e}") from e
@@ -96,29 +84,46 @@ class EmbeddingClient:
         # Parse response
         try:
             data = resp.json()
-        except Exception as e:
+        except ValueError as e:
             _logger.error("Embedding API response is not valid JSON: %s", e)
             raise EmbeddingError(f"Embedding API returned invalid JSON: {e}") from e
 
-        # Extract vectors
+        # Extract vectors from QueryEmbeddingResponse format:
+        # { "model": str, "dimensions": int, "dense": [...], "sparse": {...} | null, "trace_id": str }
         try:
-            items = data["data"]
-            if not items:
-                raise ValueError("data array is empty")
-            first = items[0]
-            embedding = first["embedding"]
-            sparse_embedding = first["sparse_embedding"]
-
-            if not isinstance(embedding, list) or len(embedding) == 0:
+            dense = data["dense"]
+            if (
+                not isinstance(dense, list)
+                or not dense
+                or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in dense)
+            ):
                 raise ValueError(
-                    f"embedding is invalid: type={type(embedding)}, "
-                    f"len={len(embedding) if isinstance(embedding, list) else 'N/A'}"
+                    f"dense vector must be a non-empty list of numbers, "
+                    f"got type={type(dense)}, len={len(dense) if isinstance(dense, list) else 'N/A'}"
                 )
 
-            if not isinstance(sparse_embedding, dict):
-                raise ValueError(f"sparse_embedding is not a dict: {type(sparse_embedding)}")
+            sparse_embedding: dict[str, Any] | None = None
+            sparse_raw = data.get("sparse")
+            if sparse_raw is not None:
+                if not isinstance(sparse_raw, dict):
+                    raise ValueError(
+                        f"sparse must be a dict or null, got {type(sparse_raw)}"
+                    )
+                indices = sparse_raw.get("indices")
+                values = sparse_raw.get("values")
+                if not isinstance(indices, list) or not isinstance(values, list):
+                    raise ValueError(
+                        "sparse indices and values must be lists"
+                    )
+                if len(indices) != len(values):
+                    raise ValueError(
+                        f"sparse indices/values length mismatch: "
+                        f"{len(indices)} != {len(values)}"
+                    )
+                if indices:
+                    sparse_embedding = {"indices": indices, "values": values}
 
-        except (KeyError, IndexError, ValueError, TypeError) as e:
+        except (KeyError, ValueError, TypeError) as e:
             _logger.error(
                 "Unexpected embedding response format: %s. Response keys: %s",
                 e, list(data.keys()) if isinstance(data, dict) else type(data),
@@ -127,13 +132,15 @@ class EmbeddingClient:
                 f"Unexpected embedding response format: {e}"
             ) from e
 
+        sparse_count = len(sparse_embedding["indices"]) if sparse_embedding else 0
         _logger.info(
-            "Embedding response OK: dense_dim=%d, sparse_tokens=%d",
-            len(embedding),
-            len(sparse_embedding.get("indices", [])),
+            "Embedding response OK: model=%s, dense_dim=%d, sparse_tokens=%d",
+            data.get("model", "unknown"),
+            len(dense),
+            sparse_count,
         )
 
         return {
-            "embedding": embedding,
+            "embedding": dense,
             "sparse_embedding": sparse_embedding,
         }

@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request, status
 
-from ..adapters.embedding import EmbeddingClient, EmbeddingError
+from ..adapters.call_embedding import EmbeddingClient, EmbeddingError
 from ..application.rerank_service import RerankService
 from ..application.search import HybridSearchService
 from ..logging import TraceIdAdapter, get_logger
