@@ -168,10 +168,23 @@ deploy:set-image:
     IMAGE_TAG: "${MODULE}:${CI_COMMIT_SHORT_SHA}.${CI_PIPELINE_IID}"
   script:
     - |
-      echo "Kiểm tra imagestreamtag: $IMAGE_TAG"
-      oc get imagestreamtag -n $PROJECT --no-headers -o name \
-        | grep -qx "imagestreamtag.image.openshift.io/$IMAGE_TAG" \
-        || { echo "Không thấy $IMAGE_TAG trong imagestream"; exit 1; }
+      # OCP tao ImageStreamTag BAT DONG BO sau khi skopeo day xong — tre vai giay.
+      # Kiem tra mot phat ngay sau job `deliver` la truot, du tag that su se co.
+      # Hoi thang dung ten tag, khong `get` toan bo roi grep: dinh dang cua
+      # `-o name` khac nhau giua cac ban oc, va grep -qx doi khop nguyen dong.
+      echo "Cho imagestreamtag: $IMAGE_TAG"
+      FOUND=0
+      for i in $(seq 1 30); do
+        if oc get imagestreamtag "$IMAGE_TAG" -n "$PROJECT" >/dev/null 2>&1; then
+          echo "Da thay sau $((i*3))s"; FOUND=1; break
+        fi
+        sleep 3
+      done
+      if [ "$FOUND" != 1 ]; then
+        echo "Khong thay $IMAGE_TAG trong imagestream sau 90s. Cac tag dang co:"
+        oc get imagestreamtag -n "$PROJECT" 2>&1 | grep "$MODULE" || echo "  (khong co tag nao cua $MODULE)"
+        exit 1
+      fi
 
       oc set image deployment/$MODULE $MODULE=$REGISTRY_INTERNAL/$PROJECT/$IMAGE_TAG -n $PROJECT
     # Dòng dưới KHÔNG có trong bản của tool-analysis-web.
