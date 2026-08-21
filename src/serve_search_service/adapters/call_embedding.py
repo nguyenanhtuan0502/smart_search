@@ -15,7 +15,24 @@ _logger: TraceIdAdapter = get_logger(__name__)
 
 
 class EmbeddingError(Exception):
-    """Raised when embedding API call fails."""
+    """Raised when embedding API call fails.
+    
+    Attributes:
+        detail: Human-readable error message
+        status: HTTP status code (502 if connection error, actual status if HTTP error)
+        retryable: Whether the error is retryable
+    """
+    
+    def __init__(
+        self,
+        detail: str,
+        status: int = 502,
+        retryable: bool = True,
+    ) -> None:
+        self.detail = detail
+        self.status = status
+        self.retryable = retryable
+        super().__init__(detail)
 
 
 class EmbeddingClient:
@@ -60,25 +77,39 @@ class EmbeddingClient:
             resp = await self._client.post("/v1/query-embeddings", json=body)
         except httpx.TimeoutException as e:
             _logger.error("Embedding API timeout: %s", e)
-            raise EmbeddingError(f"Embedding API timeout after 60s: {e}") from e
+            raise EmbeddingError(
+                detail=f"Embedding API timeout after 60s",
+                status=504,
+                retryable=True,
+            ) from e
         except httpx.ConnectError as e:
             _logger.error("Embedding API connection failed: %s", e)
             raise EmbeddingError(
-                f"Cannot connect to Embedding API at {self._base_url}: {e}"
+                detail=f"Cannot connect to Embedding API at {self._base_url}",
+                status=502,
+                retryable=True,
             ) from e
         except httpx.HTTPError as e:
             _logger.error("Embedding API HTTP error: %s", e)
-            raise EmbeddingError(f"Embedding API HTTP error: {e}") from e
+            raise EmbeddingError(
+                detail=f"Embedding API HTTP error: {str(e)[:100]}",
+                status=502,
+                retryable=True,
+            ) from e
 
         # Check HTTP status
         if resp.status_code != 200:
-            detail = resp.text[:500] if resp.text else "No response body"
+            detail = resp.text[:200] if resp.text else "No response body"
             _logger.error(
                 "Embedding API returned status=%d, body=%s",
                 resp.status_code, detail,
             )
+            # Determine retryability based on status code
+            retryable = resp.status_code >= 500  # 5xx = retryable, 4xx = not retryable
             raise EmbeddingError(
-                f"Embedding API returned HTTP {resp.status_code}: {detail}"
+                detail=f"Embedding API returned HTTP {resp.status_code}: {detail}",
+                status=resp.status_code,
+                retryable=retryable,
             )
 
         # Parse response
@@ -86,7 +117,11 @@ class EmbeddingClient:
             data = resp.json()
         except ValueError as e:
             _logger.error("Embedding API response is not valid JSON: %s", e)
-            raise EmbeddingError(f"Embedding API returned invalid JSON: {e}") from e
+            raise EmbeddingError(
+                detail=f"Embedding API returned invalid JSON",
+                status=502,
+                retryable=True,
+            ) from e
 
         # Extract vectors from QueryEmbeddingResponse format:
         # { "model": str, "dimensions": int, "dense": [...], "sparse": {...} | null, "trace_id": str }
@@ -129,7 +164,9 @@ class EmbeddingClient:
                 e, list(data.keys()) if isinstance(data, dict) else type(data),
             )
             raise EmbeddingError(
-                f"Unexpected embedding response format: {e}"
+                detail=f"Unexpected embedding response format",
+                status=502,
+                retryable=False,
             ) from e
 
         sparse_count = len(sparse_embedding["indices"]) if sparse_embedding else 0
