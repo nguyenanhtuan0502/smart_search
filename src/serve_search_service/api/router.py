@@ -5,9 +5,10 @@ from typing import Any
 
 from fastapi import APIRouter, Request, status
 
-from ..adapters.call_embedding import EmbeddingClient, EmbeddingError
+from ..application.embedding import EmbeddingService
 from ..application.rerank_service import RerankService
 from ..application.search import HybridSearchService
+from ..domain.embedding import EmbedderUnavailableError, EmbeddingResult
 from ..logging import TraceIdAdapter, get_logger
 from .errors import ApiError
 from .schemas import FilterCondition, HybridSearchRequest, HybridSearchResponse
@@ -18,6 +19,22 @@ router = APIRouter()
 
 # Singleton rerank service (stateless, safe to share)
 _rerank_service = RerankService()
+
+
+def _extract_vectors(
+    result: EmbeddingResult,
+) -> tuple[list[float], dict[str, list] | None]:
+    """Pull the dense vector and (optional) sparse vector out of a single-query
+    embedding result, shaped the way HybridSearchService expects them."""
+    item = result.items[0]
+    dense = list(item.vector)
+    sparse: dict[str, list] | None = None
+    if item.sparse is not None and item.sparse.indices:
+        sparse = {
+            "indices": list(item.sparse.indices),
+            "values": list(item.sparse.values),
+        }
+    return dense, sparse
 
 
 # ─────────────────────────────────────────────
@@ -141,7 +158,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
         {"status": 200, "result": [{"document_id": "...", "rank_document": 1}, ...]}
     """
     search_service: HybridSearchService = request.app.state.search_service
-    embedding_client: EmbeddingClient = request.app.state.embedding_client
+    embedding_service: EmbeddingService = request.app.state.embedding_service
     total_start = time.perf_counter()
 
     opts = payload.search_options
@@ -157,15 +174,22 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
     # ── Step 1: Embed query text ─────────────────────────────
     embed_start = time.perf_counter()
     try:
-        embed_result = await embedding_client.embed_query(payload.query)
-    except EmbeddingError as e:
-        _logger.error("Embedding failed: %s", e.detail)
+        embed_result = await embedding_service.create_embeddings(
+            texts=[payload.query.strip()],
+            input_type="query",
+            model=payload.embedding_model,
+            base_url=payload.embedding_url,
+            api_key=payload.embedding_api_key,
+        )
+    except EmbedderUnavailableError as e:
+        _logger.error("Embedding failed for query='%s': %s", payload.query[:50], e)
         raise ApiError(
-            status=e.status,
+            status=502,
             code="embedding_failed",
-            detail=e.detail,
-            retryable=e.retryable,
+            detail=str(e),
+            retryable=True,
         ) from e
+    dense_vector, sparse_vector = _extract_vectors(embed_result)
     embed_ms = (time.perf_counter() - embed_start) * 1000
     _logger.info("Embedding completed in %.0fms", embed_ms)
 
@@ -176,8 +200,8 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
     search_start = time.perf_counter()
     result = await search_service.hybrid_search(
         collection=payload.collection,
-        dense_vector=embed_result["embedding"],
-        sparse_vector=embed_result["sparse_embedding"],
+        dense_vector=dense_vector,
+        sparse_vector=sparse_vector,
         limit=int(payload.limit),
         payload_filter=qdrant_filter,
         vector_weight=float(opts.vector_weight),

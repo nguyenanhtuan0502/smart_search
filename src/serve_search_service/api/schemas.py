@@ -237,6 +237,22 @@ class HybridSearchRequest(BaseModel):
     )
     limit: str = Field(default="10", description="Số document trả về tối đa (1-100)")
 
+    embedding_url: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override base URL của dense embedding gateway (mặc định: theo env)",
+    )
+    embedding_model: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override dense embedding model (mặc định: theo env)",
+    )
+    embedding_api_key: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override API key gửi tới embedding gateway (mặc định: theo env)",
+    )
+
     search_options: SearchOptions = Field(
         default_factory=SearchOptions,
         description="Search tuning parameters (weights, thresholds, etc.)",
