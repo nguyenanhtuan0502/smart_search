@@ -1,17 +1,14 @@
 # =============================================================================
-# .gitlab-ci.yml — serve-search-service   (ĐỔI TÊN thành .gitlab-ci.yml)
-# Copy vào GỐC repo serve-search-service.
+# .gitlab-ci.yml — serve-search-service
+# 3 stage: containerize -> deliver -> deploy.
 #
-# Đây là BẢN ĐẦY ĐỦ dùng ở bước 5-6.
-# Bước 2 và 3 dùng bản rút gọn — xem buoc-2-3-dua-image-len-ocp.md.
+# Logic dung chung nam trong template cua repo genai/iac/gitlab-ci:
+#   .containerize  -> podman login $REGISTRY_HOST -u builder
+#   .deliver       -> skopeo copy docker-archive:...tar -> docker://$IMG_SRC
+#   .deploy        -> kubeconfig tu $OCP_GENAI_KUBECONFIG
+#   .profile:genai -> PROJECT=genai, DEPLOY_NAMESPACE=genai
 #
-# Toàn bộ logic nằm trong template của repo genai/iac/gitlab-ci:
-#   .containerize → image podman, `podman login $REGISTRY_HOST -u builder`
-#   .deliver      → skopeo copy docker-archive:...tar → docker://$IMG_SRC
-#   .deploy       → kubeconfig từ $OCP_GENAI_KUBECONFIG
-#   .profile:genai→ PROJECT=genai, DEPLOY_NAMESPACE=genai
-#
-# Bốn biến sau do group `genai` cung cấp, KHÔNG khai ở đây:
+# Bon bien do group `genai` cung cap, KHONG khai o day:
 #   REGISTRY_HOST  REGISTRY_PASS  OCP_GENAI_TOKEN  OCP_GENAI_KUBECONFIG
 # =============================================================================
 
@@ -23,6 +20,24 @@ include:
     ref: 'develop'
     file: .rules.yml
 
+
+# --- Chan tu goc: khong tao pipeline cho nhanh la ---------------------------
+# Khai `workflow` o file chinh se DE LEN `workflow` cua file include.
+# Can khai o day vi `.rules.yml` lay theo `ref` — noi dung ben do co the khac
+# va da chung minh la khong loc nhanh: nhanh feature/* van sinh pipeline.
+#
+# Chan o tang `workflow` chu khong chi o tang job: neu chi chan job thi GitLab
+# van tao pipeline rong roi bao "No stages / jobs" — dung cai loi `error` dang
+# thay tren nhanh feature/*.
+#
+# KHONG cho merge_request_event: cac job deu khong chay tren MR, cho phep chi
+# tao them pipeline rong va lam MR treo o "Checking pipeline status".
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(dev|develop|sit|uat|release.*)$/'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+
 variables:
   MODULE: serve-search-service
   GIT_STRATEGY: clone
@@ -33,8 +48,6 @@ stages:
   - containerize
   - deliver
   - deploy
-
-# --- Đóng gói image bằng podman, xuất ra file .tar ---------------------------
 
 # --- Chan nhanh, khong phu thuoc workflow.rules cua repo dung chung ----------
 # `.rules:post-merge` cua genai/iac/gitlab-ci chi kiem tra CI_PIPELINE_SOURCE,
@@ -82,7 +95,10 @@ containerize:build:
   # build. Khong don thi VM day dia sau vai chuc pipeline.
   after_script:
     - podman rmi -f $IMG_SRC || true
-    - podman image prune -f || true
+    # KHONG dung `podman image prune -f` tran lan: no xoa ca lop trung gian cua
+    # multi-stage build, tuc la xoa sach cache -> lan build sau tai lai tu dau.
+    # Chi don thu cu hon 3 ngay.
+    - podman image prune -f --filter until=72h || true
   interruptible: true
   artifacts:
     expire_in: 10 mins
@@ -142,7 +158,7 @@ deliver:upload-image:
 # --- Cập nhật Deployment sang image mới --------------------------------------
 deploy:set-image:
   # Hai pipeline chay song song se tranh nhau `oc set image` -> rollout day nhau.
-  resource_group: deploy-$CI_ENVIRONMENT_NAME-serve-search-service
+  resource_group: deploy-serve-search-service
   extends:
     - .rules:shared-branches
     - .profile:genai
