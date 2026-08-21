@@ -107,7 +107,6 @@ class HybridSearchService:
         dense_vector: list[float] | None = None,
         sparse_vector: dict[str, Any] | None = None,
         limit: int = 10,
-        score_threshold: float | None = None,
         payload_filter: dict[str, Any] | None = None,
         vector_weight: float = 0.7,
         keyword_weight: float = 0.3,
@@ -179,7 +178,6 @@ class HybridSearchService:
                 collection=collection,
                 vector=dense_vector,
                 limit=limit,
-                score_threshold=score_threshold,
                 payload_filter=payload_filter,
                 with_payload=with_payload,
             )
@@ -234,7 +232,6 @@ class HybridSearchService:
                 collection=collection,
                 vector=dense_vector,
                 limit=candidate_limit,
-                score_threshold=score_threshold,
                 payload_filter=payload_filter,
                 with_payload=with_payload,
             ),
@@ -249,10 +246,10 @@ class HybridSearchService:
         )
 
         # Handle unexpected exceptions from gather
-        if isinstance(dense_result, BaseException):
+        if isinstance(dense_result, Exception):
             _logger.error("Dense search raised exception: %s", dense_result)
             dense_result = {"error": True, "status": 503, "detail": str(dense_result)}
-        if isinstance(sparse_result, BaseException):
+        if isinstance(sparse_result, Exception):
             _logger.error("Sparse search raised exception: %s", sparse_result)
             sparse_result = {"error": True, "status": 503, "detail": str(sparse_result)}
 
@@ -261,8 +258,22 @@ class HybridSearchService:
 
         # ── Both failed ─────────────────────────────────────────
         if not dense_ok and not sparse_ok:
-            _logger.error("Both dense and sparse search failed")
-            return {"error": True, "status": 503, "detail": "Both dense and sparse search failed"}
+            dense_status = dense_result.get("status", 503)
+            sparse_status = sparse_result.get("status", 503)
+            
+            # Prefer 504 if either side timed out, otherwise use 503
+            status = 504 if 504 in (dense_status, sparse_status) else 503
+            
+            _logger.error(
+                "Both dense and sparse search failed: dense_status=%d, sparse_status=%d",
+                dense_status,
+                sparse_status,
+            )
+            return {
+                "error": True,
+                "status": status,
+                "detail": "Both dense and sparse search failed"
+            }
 
         # ── Graceful degradation based on error state ───────────
         if not dense_ok and sparse_ok:

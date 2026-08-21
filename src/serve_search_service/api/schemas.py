@@ -2,7 +2,99 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# ─────────────────────────────────────────────
+# Filter
+# ─────────────────────────────────────────────
+
+
+class FilterCondition(BaseModel):
+    """A single filter condition for Qdrant payload filtering.
+
+    Examples:
+        {"key": "group_ids", "value": ["hr", "aiit"]}
+        {"key": "doc_status", "value": ["active"]}
+        {"key": "document_id", "value": "doc-001"}
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, description="Payload field name to filter on")
+    value: str | list[str] = Field(
+        min_length=1,
+        description="Value or list of values to match (OR within a condition)",
+    )
+
+
+# ─────────────────────────────────────────────
+# Search Options
+# ─────────────────────────────────────────────
+
+
+class SearchOptions(BaseModel):
+    """Search tuning parameters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vector_weight: str = Field(
+        default="0.7", description="Dense vector weight in RRF fusion (0.0 to 1.0)"
+    )
+    keyword_weight: str = Field(
+        default="0.3", description="Sparse (BM25) weight in RRF fusion (0.0 to 1.0)"
+    )
+    rrf_k: str = Field(
+        default="60", description="RRF constant k (1 to 200)"
+    )
+    candidate_multiplier: str = Field(
+        default="5",
+        description="Multiply limit by this to get candidate pool size (2 to 20)",
+    )
+
+    @field_validator("vector_weight", "keyword_weight")
+    @classmethod
+    def validate_weight_string(cls, v: str) -> str:
+        try:
+            value = float(v)
+        except ValueError:
+            raise ValueError(f"Weight must be a valid number string, got '{v}'")
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"Weight must be between 0.0 and 1.0, got {value}")
+        return v
+
+    @field_validator("rrf_k")
+    @classmethod
+    def validate_rrf_k_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError:
+            raise ValueError(f"rrf_k must be a valid integer string, got '{v}'")
+        if not (1 <= value <= 200):
+            raise ValueError(f"rrf_k must be between 1 and 200, got {value}")
+        return v
+
+    @field_validator("candidate_multiplier")
+    @classmethod
+    def validate_candidate_multiplier_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError:
+            raise ValueError(f"candidate_multiplier must be a valid integer string, got '{v}'")
+        if not (2 <= value <= 20):
+            raise ValueError(f"candidate_multiplier must be between 2 and 20, got {value}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_weights_not_both_zero(self) -> "SearchOptions":
+        vector_w = float(self.vector_weight)
+        keyword_w = float(self.keyword_weight)
+        if vector_w == 0 and keyword_w == 0:
+            raise ValueError(
+                "At least one of vector_weight or keyword_weight must be > 0."
+            )
+        return self
+
 
 # ─────────────────────────────────────────────
 # Rerank Options
@@ -10,11 +102,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RerankOptions(BaseModel):
-    """Document-level reranking configuration.
-
-    When provided, the API aggregates chunk results into document-level
-    results and returns them sorted by document relevance score.
-    """
+    """Document-level reranking configuration."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -22,160 +110,192 @@ class RerankOptions(BaseModel):
         default="hybrid",
         description="Rerank strategy: maxp | top_m_mean | hit_count | rrf | hybrid",
     )
-    weights: tuple[float, float, float, float] | None = Field(
+    weights: str | None = Field(
         default=None,
         description=(
-            "Hybrid strategy weights: (maxp, top_m_mean, hit_count, rrf). "
+            "Hybrid strategy weights as string: '(w1, w2, w3, w4)' for (maxp, top_m_mean, hit_count, rrf). "
             "Must sum to 1.0. Only used when strategy='hybrid'."
         ),
     )
-    mean_m: int = Field(default=3, ge=1, description="Top M chunks for top_m_mean strategy")
-    rrf_k: int = Field(default=60, ge=1, description="RRF k constant for rrf/hybrid strategy")
+    mean_m: str = Field(
+        default="3", description="Top M chunks for top_m_mean strategy"
+    )
+    rrf_k: str = Field(
+        default="60", description="RRF k constant for rrf/hybrid strategy"
+    )
     document_id_field: str = Field(
         default="document_id",
         description="Payload field name that identifies the parent document",
     )
-    top_chunks: int = Field(
-        default=3,
-        ge=1,
-        le=20,
-        description="Number of top chunks to include per document in reranked result",
+    top_chunks: str = Field(
+        default="3",
+        description="Number of top chunks used internally for scoring",
     )
+
+    @staticmethod
+    def _parse_weights(weights: str) -> tuple[float, ...]:
+        """Parse weights string to tuple.
+        
+        Accepts formats like:
+        - "(0.25, 0.25, 0.25, 0.25)"
+        - "0.25, 0.25, 0.25, 0.25"
+        """
+        weights_str = weights.strip()
+        if weights_str.startswith("(") and weights_str.endswith(")"):
+            weights_str = weights_str[1:-1]
+        return tuple(float(w.strip()) for w in weights_str.split(","))
+
+    @field_validator("mean_m")
+    @classmethod
+    def validate_mean_m_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError:
+            raise ValueError(f"mean_m must be a valid integer string, got '{v}'")
+        if value < 1:
+            raise ValueError(f"mean_m must be >= 1, got {value}")
+        return v
+
+    @field_validator("rrf_k")
+    @classmethod
+    def validate_rrf_k_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError:
+            raise ValueError(f"rrf_k must be a valid integer string, got '{v}'")
+        if value <= 0:
+            raise ValueError(f"rrf_k must be > 0, got {value}")
+        return v
+
+    @field_validator("top_chunks")
+    @classmethod
+    def validate_top_chunks_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError:
+            raise ValueError(f"top_chunks must be a valid integer string, got '{v}'")
+        if not (1 <= value <= 20):
+            raise ValueError(f"top_chunks must be between 1 and 20, got {value}")
+        return v
 
     @model_validator(mode="after")
     def validate_weights(self) -> "RerankOptions":
-        """Validate weights when strategy is hybrid."""
+        if self.strategy != "hybrid" and self.weights is not None:
+            raise ValueError("weights is only supported when strategy='hybrid'.")
         if self.weights is not None:
-            if any(w < 0 for w in self.weights):
+            try:
+                weight_values = self._parse_weights(self.weights)
+            except ValueError:
+                raise ValueError(f"weights must be comma-separated floats, got '{self.weights}'")
+            
+            if len(weight_values) != 4:
+                raise ValueError(f"weights must have exactly 4 values, got {len(weight_values)}")
+            
+            if any(w < 0 for w in weight_values):
                 raise ValueError("All weights must be non-negative.")
-            if abs(sum(self.weights) - 1.0) > 1e-6:
+            if abs(sum(weight_values) - 1.0) > 1e-6:
                 raise ValueError(
-                    f"Weights must sum to 1.0, got {sum(self.weights):.6f}."
+                    f"Weights must sum to 1.0, got {sum(weight_values):.6f}."
                 )
-        elif self.strategy == "hybrid":
-            # Use default weights — no validation needed
-            pass
         return self
+
+    def get_weights_tuple(self) -> tuple[float, ...] | None:
+        """Get weights as tuple for service consumption."""
+        if not self.weights:
+            return None
+        return self._parse_weights(self.weights)
 
 
 # ─────────────────────────────────────────────
 # Search Request
 # ─────────────────────────────────────────────
 
+DEFAULT_COLLECTION = "EISO_COLLECTION"
+
 
 class HybridSearchRequest(BaseModel):
-    """Hybrid search — nhận query text, service tự embed rồi search.
+    """Hybrid search request.
 
-    Luồng: query → Embedding API → dense + sparse vectors → Qdrant → RRF fusion → result.
-    Khi có `rerank`: result chuyển sang document-level format.
+    Example:
+        {
+            "query": "quy trình tuyển dụng nhân sự",
+            "collection": "eiso_collection",
+            "limit": 20,
+            "search_options": {...},
+            "filter": [{"key": "group_ids", "value": ["hr"]}],
+            "rerank": {"strategy": "hybrid", "top_chunks": 3}
+        }
     """
 
     model_config = ConfigDict(extra="forbid")
 
     query: str = Field(min_length=1, description="Query text (câu hỏi / từ khóa tìm kiếm)")
-    collection: str = Field(min_length=1)
-    limit: int = Field(default=10, ge=1, le=100)
-    score_threshold: float | None = Field(
-        default=None,
-        description="Minimum score threshold (applies to dense search only)",
+    collection: str = Field(
+        default=DEFAULT_COLLECTION,
+        min_length=1,
+        description="Tên collection trong Qdrant (default: EISO_COLLECTION)",
     )
-    filter: dict[str, Any] | None = None
-    vector_weight: float = Field(
-        default=0.7, ge=0.0, le=1.0, description="Dense weight in RRF"
-    )
-    keyword_weight: float = Field(
-        default=0.3, ge=0.0, le=1.0, description="Sparse weight in RRF"
-    )
-    rrf_k: int = Field(default=60, ge=1, le=200)
-    candidate_multiplier: int = Field(default=5, ge=2, le=20)
-    with_payload: bool = True
+    limit: str = Field(default="10", description="Số document trả về tối đa (1-100)")
 
-    @model_validator(mode="after")
-    def validate_weights_not_both_zero(self) -> "HybridSearchRequest":
-        """At least one of vector_weight or keyword_weight must be > 0."""
-        if self.vector_weight == 0 and self.keyword_weight == 0:
-            raise ValueError("At least one of vector_weight or keyword_weight must be greater than 0.")
-        return self
-    rerank: RerankOptions | None = Field(
+    search_options: SearchOptions = Field(
+        default_factory=SearchOptions,
+        description="Search tuning parameters (weights, thresholds, etc.)",
+    )
+    filter: list[FilterCondition] | None = Field(
         default=None,
         description=(
-            "Document-level reranking. When provided, result switches to "
-            "document-level format sorted by document relevance score."
+            'Payload filter conditions (AND logic between conditions). '
+            'Example: [{"key": "group_ids", "value": ["hr"]}]'
         ),
     )
-
-
-# ─────────────────────────────────────────────
-# Search Response — Chunk-level (no rerank)
-# ─────────────────────────────────────────────
-
-
-class ChunkResultItem(BaseModel):
-    """A single chunk result from search (RRF fusion or single-mode)."""
-
-    id: Any
-    payload: dict[str, Any] | None = None
-    score: float = Field(description="RRF score (hybrid) or similarity/keyword score (single-mode)")
-    score_type: Literal["rrf", "similarity", "keyword"] = Field(
-        default="rrf",
-        description="Type of score: 'rrf' for fused, 'similarity' for dense, 'keyword' for sparse",
+    rerank: RerankOptions | None = Field(
+        default=None,
+        description="Document-level reranking options",
     )
-    vector_rank: int | None = None
-    keyword_rank: int | None = None
+
+    @field_validator("query")
+    @classmethod
+    def strip_query(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Query must not be blank.")
+        return v
+
+    @field_validator("limit")
+    @classmethod
+    def validate_limit_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError:
+            raise ValueError(f"limit must be a valid integer string, got '{v}'")
+        if not (1 <= value <= 100):
+            raise ValueError(f"limit must be between 1 and 100, got {value}")
+        return v
 
 
 # ─────────────────────────────────────────────
-# Search Response — Document-level (with rerank)
+# Response
 # ─────────────────────────────────────────────
-
-
-class DocumentChunkItem(BaseModel):
-    """A chunk belonging to a reranked document."""
-
-    chunk_id: str
-    payload: dict[str, Any] | None = None
-    score: float = Field(description="RRF score or similarity/keyword score of this chunk")
-    score_type: Literal["rrf", "similarity", "keyword"] = "rrf"
-    vector_rank: int | None = None
-    keyword_rank: int | None = None
 
 
 class DocumentResultItem(BaseModel):
-    """A document-level result after reranking (when rerank IS requested)."""
+    """A document-level result."""
 
     document_id: str
-    score: float = Field(description="Document relevance score from rerank strategy")
-    chunks: list[DocumentChunkItem] = Field(
-        description="Top chunks for this document, sorted by score desc"
-    )
-
-
-# ─────────────────────────────────────────────
-# Unified Response
-# ─────────────────────────────────────────────
+    rank_document: int = Field(description="Document rank (1-based)")
 
 
 class HybridSearchResponse(BaseModel):
-    """Hybrid search response.
+    """Search response.
 
-    mode values:
-    - "hybrid": both dense + sparse succeeded, chunk-level RRF result
-    - "vector_only": dense-only search (sparse not provided), chunk-level result
-    - "keyword_only": sparse-only search (dense not provided), chunk-level result
-    - "vector_only_fallback": sparse search failed, fallback to dense results
-    - "keyword_only_fallback": dense search failed, fallback to sparse results
-    - "hybrid_reranked": rerank applied, document-level result
+    {
+        "status": 200,
+        "result": [
+            {"document_id": "doc-001", "rank_document": 1},
+            {"document_id": "doc-002", "rank_document": 2}
+        ]
+    }
     """
 
-    result: list[ChunkResultItem] | list[DocumentResultItem] = Field(default_factory=list)
-    vector_count: int = 0
-    keyword_count: int = 0
-    fused_count: int = 0
-    mode: Literal[
-        "hybrid",
-        "vector_only",
-        "keyword_only",
-        "vector_only_fallback",
-        "keyword_only_fallback",
-        "hybrid_reranked",
-    ] = "hybrid"
+    status: int = 200
+    result: list[DocumentResultItem] = Field(default_factory=list)

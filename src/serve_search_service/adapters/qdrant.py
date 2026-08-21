@@ -28,10 +28,18 @@ class QdrantClient:
             self._base_url, bool(settings.qdrant_api_key),
         )
 
+        # Structured timeout configuration instead of magic number
+        timeout = httpx.Timeout(
+            connect=5.0,    # Connection timeout
+            read=30.0,      # Read timeout
+            write=30.0,     # Write timeout
+            pool=5.0,       # Pool timeout
+        )
+
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers=headers,
-            timeout=30,
+            timeout=timeout,
             trust_env=False,
             limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
         )
@@ -47,7 +55,6 @@ class QdrantClient:
         collection: str,
         vector: list[float],
         limit: int = 50,
-        score_threshold: float | None = None,
         payload_filter: dict[str, Any] | None = None,
         with_payload: bool = True,
     ) -> dict[str, Any]:
@@ -58,9 +65,7 @@ class QdrantClient:
             "with_payload": with_payload,
             "with_vectors": False,
         }
-        if score_threshold is not None:
-            body["score_threshold"] = score_threshold
-        if payload_filter:
+        if payload_filter is not None:
             body["filter"] = payload_filter
 
         url = f"/collections/{collection}/points/search"
@@ -70,13 +75,28 @@ class QdrantClient:
             resp = await self._client.post(url, json=body)
             _logger.info("Dense search response: status=%d", resp.status_code)
             resp.raise_for_status()
-        except httpx.TimeoutException:
-            _logger.error("Dense search timeout for collection=%s", collection)
-            return {"error": True, "status": 504, "detail": "Qdrant timeout (dense)"}
-        except httpx.HTTPError as e:
-            resp_text = resp.text if "resp" in dir() and hasattr(resp, "text") else "N/A"
-            _logger.error("Dense search error: %s, response=%s", e, resp_text[:200])
-            return {"error": True, "status": 503, "detail": f"Qdrant error (dense): {e}"}
+        except httpx.TimeoutException as e:
+            _logger.error("Dense search timeout for collection=%s: %s", collection, e)
+            return {"error": True, "status": 504, "detail": f"Qdrant timeout (dense): {e}"}
+        except httpx.HTTPStatusError as e:
+            # HTTP error with status code (4xx, 5xx)
+            _logger.error(
+                "Dense search HTTP error for collection=%s: status=%d, detail=%s",
+                collection, e.response.status_code, e.response.text[:200],
+            )
+            return {
+                "error": True,
+                "status": e.response.status_code,
+                "detail": f"Qdrant HTTP error (dense): {e.response.status_code}",
+            }
+        except httpx.RequestError as e:
+            # Network/connection errors (connection failed, DNS resolution, etc.)
+            _logger.error("Dense search network error for collection=%s: %s", collection, e)
+            return {
+                "error": True,
+                "status": 503,
+                "detail": f"Qdrant unavailable (dense): {str(e)[:100]}",
+            }
 
         result: dict[str, Any] = resp.json()
         return result
@@ -96,7 +116,7 @@ class QdrantClient:
             "with_payload": with_payload,
             "with_vectors": False,
         }
-        if payload_filter:
+        if payload_filter is not None:
             body["filter"] = payload_filter
 
         url = f"/collections/{collection}/points/search"
@@ -107,13 +127,28 @@ class QdrantClient:
             resp = await self._client.post(url, json=body)
             _logger.info("Sparse search response: status=%d", resp.status_code)
             resp.raise_for_status()
-        except httpx.TimeoutException:
-            _logger.error("Sparse search timeout for collection=%s", collection)
-            return {"error": True, "status": 504, "detail": "Qdrant timeout (sparse)"}
-        except httpx.HTTPError as e:
-            resp_text = resp.text if "resp" in dir() and hasattr(resp, "text") else "N/A"
-            _logger.error("Sparse search error: %s, response=%s", e, resp_text[:200])
-            return {"error": True, "status": 503, "detail": f"Qdrant error (sparse): {e}"}
+        except httpx.TimeoutException as e:
+            _logger.error("Sparse search timeout for collection=%s: %s", collection, e)
+            return {"error": True, "status": 504, "detail": f"Qdrant timeout (sparse): {e}"}
+        except httpx.HTTPStatusError as e:
+            # HTTP error with status code (4xx, 5xx)
+            _logger.error(
+                "Sparse search HTTP error for collection=%s: status=%d, detail=%s",
+                collection, e.response.status_code, e.response.text[:200],
+            )
+            return {
+                "error": True,
+                "status": e.response.status_code,
+                "detail": f"Qdrant HTTP error (sparse): {e.response.status_code}",
+            }
+        except httpx.RequestError as e:
+            # Network/connection errors (connection failed, DNS resolution, etc.)
+            _logger.error("Sparse search network error for collection=%s: %s", collection, e)
+            return {
+                "error": True,
+                "status": 503,
+                "detail": f"Qdrant unavailable (sparse): {str(e)[:100]}",
+            }
 
         result: dict[str, Any] = resp.json()
         return result
