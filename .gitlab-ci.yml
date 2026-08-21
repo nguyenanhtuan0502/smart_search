@@ -12,14 +12,61 @@
 #   REGISTRY_HOST  REGISTRY_PASS  OCP_GENAI_TOKEN  OCP_GENAI_KUBECONFIG
 # =============================================================================
 
-include:
-  - project: genai/iac/gitlab-ci
-    ref: 'develop'
-    file: .stages.yml
-  - project: genai/iac/gitlab-ci
-    ref: 'develop'
-    file: .rules.yml
+# =============================================================================
+# KHONG dung `include: project:` — co chu y.
+#
+# GitLab phan giai `include` bang quyen cua NGUOI KICH HOAT pipeline. Dev khong
+# co quyen doc `genai/iac/gitlab-ci` thi buoc gop cau hinh that bai, va GitLab
+# tao mot pipeline RONG roi danh dau loi — truoc ca khi `workflow` duoc danh gia,
+# nen khong luat nao chan duoc. Chep template vao day de khong con phu thuoc do.
+#
+# Dev khong duoc cap quyen vao project do, nen day la cach lam CHINH THUC chu
+# khong phai giai phap tam.
+#
+# Bon template duoi day sao tu genai/iac/gitlab-ci (.stages.yml, .rules.yml),
+# co hai khac biet CO Y:
+#   - .containerize: bo 2 dong go roi `cat ~/.docker/config.json` va `echo $HOME`
+#     (in noi dung file dang nhap registry ra log, khong phuc vu gi)
+#   - .deploy: bo `script` goc (helm upgrade ./helm-charts) — thu muc do khong
+#     ton tai trong repo service, va job deploy da ghi de bang `oc set image`
+#
+# Doi lai: template cua org sua thi file nay KHONG tu nhan duoc. Dinh ky chay
+#   ./check-template-drift.sh
+# de doi chieu voi ban moi nhat trong SourceCode/gitlab-ci/.
+# =============================================================================
 
+.profile:genai:
+  variables:
+    DEPLOY_NAMESPACE: genai
+    PROJECT: genai
+
+.containerize:
+  stage: containerize
+  image: ebit.tpb.vn/podman/stable:v3.4.0
+  variables:
+    IMAGE_TAG: $CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID
+  before_script:
+    - echo $REGISTRY_PASS | podman login --tls-verify=false $REGISTRY_HOST --username builder --password-stdin
+
+.deliver:
+  stage: deliver
+  image: ebit.tpb.vn/edf/duonght2-utl:v1.2
+  variables:
+    GIT_STRATEGY: none
+    TOKEN: $OCP_GENAI_TOKEN
+  before_script:
+    - ls -lh ./image_folder/$MODULE.tar
+  script:
+    - skopeo copy docker-archive:./image_folder/$MODULE.tar docker://$IMG_SRC --dest-creds=devops:$TOKEN --dest-tls-verify=false
+
+.deploy:
+  stage: deploy
+  image: ebit.tpb.vn/edf/duonght2-utl:v1.2
+  variables:
+    GIT_STRATEGY: none
+    KUBECONFIG: kubeconfig.yml
+  before_script:
+    - echo $OCP_GENAI_KUBECONFIG | base64 -d > kubeconfig.yml
 
 # --- Chan tu goc: khong tao pipeline cho nhanh la ---------------------------
 # Khai `workflow` o file chinh se DE LEN `workflow` cua file include.
