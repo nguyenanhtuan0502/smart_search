@@ -34,9 +34,20 @@ class ServiceSettings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
 
-    # Embedding service (serve-data-processing-service)
-    embedding_url: str = "http://localhost:8000"
+    # Dense embedding backend.
+    embedding_url: str = "http://10.6.14.127:9003"
     embedding_model: str = "Qwen/Qwen3-Embedding-8B"
+    embedding_api_key: str | None = None
+    embedding_dimensions: int = 4096
+    embedding_timeout_seconds: float = 60.0
+    embedding_max_retries: int = 2
+    embedding_retry_backoff_seconds: float = 1.5
+
+    # Sparse embedding (BM25, computed in-process)
+    sparse_embedding_model: str = "bm25"
+    sparse_embedding_k1: float = 1.5
+    sparse_embedding_b: float = 0.75
+    sparse_embedding_avg_len: float = 256.0
 
     @field_validator("qdrant_url")
     @classmethod
