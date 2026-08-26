@@ -11,7 +11,7 @@ from ..application.search import HybridSearchService
 from ..domain.embedding import EmbedderUnavailableError, EmbeddingResult
 from ..logging import TraceIdAdapter, get_logger
 from .errors import ApiError
-from .schemas import FilterCondition, HybridSearchRequest, HybridSearchResponse
+from .schemas import FilterCondition, HybridSearchRequest, HybridSearchResponse, SearchOptions
 
 _logger: TraceIdAdapter = get_logger(__name__)
 
@@ -161,14 +161,15 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
     embedding_service: EmbeddingService = request.app.state.embedding_service
     total_start = time.perf_counter()
 
-    opts = payload.search_options
+    opts = payload.search_options or SearchOptions()
 
     _logger.info(
-        "POST /v1/search/hybrid | collection=%s, query_len=%d, limit=%d, rerank=%s",
+        "POST /v1/search/hybrid | collection=%s, query_len=%d, limit=%d, rerank=%s, has_udf=%s",
         payload.collection,
         len(payload.query),
         int(payload.limit),
         payload.rerank.strategy if payload.rerank else None,
+        bool(payload.udf),
     )
 
     # ── Step 1: Embed query text ─────────────────────────────

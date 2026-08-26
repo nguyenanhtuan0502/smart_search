@@ -28,6 +28,15 @@ class FilterCondition(BaseModel):
     )
 
 
+class UdfField(BaseModel):
+    """A user-defined field in the MAS payload format."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(min_length=1, description="User-defined field name")
+    value: Any = Field(description="User-defined field value")
+
+
 # ─────────────────────────────────────────────
 # Search Options
 # ─────────────────────────────────────────────
@@ -227,7 +236,7 @@ class HybridSearchRequest(BaseModel):
         }
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     query: str = Field(min_length=1, description="Query text (câu hỏi / từ khóa tìm kiếm)")
     collection: str = Field(
@@ -253,9 +262,10 @@ class HybridSearchRequest(BaseModel):
         description="Override API key gửi tới embedding gateway (mặc định: theo env)",
     )
 
-    search_options: SearchOptions = Field(
-        default_factory=SearchOptions,
+    search_options: SearchOptions | None = Field(
+        default=None,
         description="Search tuning parameters (weights, thresholds, etc.)",
+        alias="searchOptions",
     )
     filter: list[FilterCondition] | None = Field(
         default=None,
@@ -267,6 +277,10 @@ class HybridSearchRequest(BaseModel):
     rerank: RerankOptions | None = Field(
         default=None,
         description="Document-level reranking options",
+    )
+    udf: list[UdfField] | None = Field(
+        default=None,
+        description="User-defined fields in MAS format: [{key, value}, ...]",
     )
 
     @field_validator("query")
