@@ -3,7 +3,9 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from ..logging import current_trace_id
+from ..logging import current_trace_id, get_logger
+
+_logger = get_logger(__name__)
 
 
 class ApiError(Exception):
@@ -56,6 +58,14 @@ def error_response(
 
 async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
     """Handle ApiError exceptions."""
+    _logger.error(
+        "API error on %s: status=%d, code=%s, detail=%s, retryable=%s",
+        request.url.path,
+        exc.status,
+        exc.code,
+        exc.detail,
+        exc.retryable,
+    )
     return error_response(
         request,
         status=exc.status,
@@ -77,7 +87,19 @@ async def handle_validation_error(
         detail = first_error.get("msg", "Validation failed.")
     else:
         detail = "Validation failed."
-    
+
+    # Log all validation errors with field locations for debugging
+    # (e.g. weights must sum to 1.0, limit out of range, etc.)
+    _logger.warning(
+        "Validation error on %s: %d error(s): %s",
+        request.url.path,
+        len(errors),
+        [
+            {"loc": err.get("loc"), "msg": err.get("msg")}
+            for err in errors
+        ],
+    )
+
     return error_response(
         request,
         status=422,
