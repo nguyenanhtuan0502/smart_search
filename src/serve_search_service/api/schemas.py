@@ -60,6 +60,19 @@ class SearchOptions(BaseModel):
         default="5",
         description="Multiply limit by this to get candidate pool size (2 to 20)",
     )
+    fusion_mode: Literal["client", "server_rrf", "batch_client_rrf"] = Field(
+        default="client",
+        description=(
+            "Fusion strategy for hybrid search:\n"
+            "- 'client' (default): dense + sparse in 2 parallel Qdrant calls, then "
+            "weighted RRF in-process (supports vector_weight/keyword_weight/rrf_k).\n"
+            "- 'server_rrf': single Qdrant Query API call with server-side RRF fusion "
+            "(weights ignored, requires Qdrant >= 1.10).\n"
+            "- 'batch_client_rrf': single Qdrant batch request retrieves dense + sparse "
+            "candidates, then weighted RRF in-process (keeps vector_weight/keyword_weight/"
+            "rrf_k, 1 round-trip, requires Qdrant >= 1.10)."
+        ),
+    )
 
     @field_validator("vector_weight", "keyword_weight")
     @classmethod
@@ -227,7 +240,7 @@ class HybridSearchRequest(BaseModel):
 
     Example:
         {
-            "query": "quy trình tuyển dụng nhân sự",
+            "query": "recruitment process for staff",
             "collection": "eiso_collection",
             "limit": 20,
             "search_options": {...},
@@ -238,28 +251,28 @@ class HybridSearchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    query: str = Field(min_length=1, description="Query text (câu hỏi / từ khóa tìm kiếm)")
+    query: str = Field(min_length=1, description="Query text (question / search keywords)")
     collection: str = Field(
         default=DEFAULT_COLLECTION,
         min_length=1,
-        description="Tên collection trong Qdrant (default: EISO_COLLECTION)",
+        description="Qdrant collection name (default: EISO_COLLECTION)",
     )
-    limit: str = Field(default="10", description="Số document trả về tối đa (1-100)")
+    limit: str = Field(default="10", description="Max number of documents to return (1-100)")
 
     embedding_url: str | None = Field(
         default=None,
         min_length=1,
-        description="Override base URL của dense embedding gateway (mặc định: theo env)",
+        description="Override the dense embedding gateway base URL (default: from env)",
     )
     embedding_model: str | None = Field(
         default=None,
         min_length=1,
-        description="Override dense embedding model (mặc định: theo env)",
+        description="Override the dense embedding model (default: from env)",
     )
     embedding_api_key: str | None = Field(
         default=None,
         min_length=1,
-        description="Override API key gửi tới embedding gateway (mặc định: theo env)",
+        description="Override the API key sent to the embedding gateway (default: from env)",
     )
 
     search_options: SearchOptions | None = Field(

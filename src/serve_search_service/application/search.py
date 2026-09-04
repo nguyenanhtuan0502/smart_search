@@ -11,6 +11,11 @@ _logger: TraceIdAdapter = get_logger(__name__)
 # Hard limit on candidate retrieval to avoid overloading Qdrant.
 MAX_CANDIDATE_LIMIT = 100
 
+# Fusion strategies accepted by hybrid_search. The public DTO enforces this
+# via Literal[...], but the service validates too so direct (non-HTTP) callers
+# get a clear error instead of silently falling through to client-mode.
+VALID_FUSION_MODES = frozenset({"client", "server_rrf", "batch_client_rrf"})
+
 
 def rrf_fuse(
     dense_points: list[dict[str, Any]],
@@ -89,6 +94,31 @@ def _format_single_results(
     ]
 
 
+def _format_fused_results(
+    points: list[dict[str, Any]],
+    *,
+    limit: int,
+    score_type: str = "rrf",
+) -> list[dict[str, Any]]:
+    """Format results that are already fused server-side (e.g. Qdrant RRF).
+
+    Unlike single-mode results, per-branch ranks are unknown here: the points
+    are a single fused list, so ``vector_rank``/``keyword_rank`` are left as
+    None rather than faked from the fused position.
+    """
+    return [
+        {
+            "id": p["id"],
+            "payload": p.get("payload"),
+            "score": p.get("score", 0),
+            "score_type": score_type,
+            "vector_rank": None,
+            "keyword_rank": None,
+        }
+        for p in points[:limit]
+    ]
+
+
 class HybridSearchService:
     """Orchestrate hybrid search: dense + sparse → RRF fusion.
 
@@ -112,6 +142,7 @@ class HybridSearchService:
         keyword_weight: float = 0.3,
         rrf_k: int = 60,
         candidate_multiplier: int = 5,
+        fusion_mode: str = "client",
         with_payload: bool = True,
     ) -> dict[str, Any]:
         """Execute search based on available vectors and return fused results."""
@@ -138,7 +169,10 @@ class HybridSearchService:
                 "detail": f"limit must not exceed {MAX_CANDIDATE_LIMIT}.",
             }
 
-        if candidate_multiplier <= 0:
+        # Service-level sanity bound only. The public DTO (SearchOptions)
+        # enforces the stricter 2..20 range; this guards direct/non-HTTP
+        # callers against a nonsensical multiplier.
+        if candidate_multiplier < 1:
             return {
                 "error": True,
                 "status": 422,
@@ -164,6 +198,16 @@ class HybridSearchService:
                 "error": True,
                 "status": 422,
                 "detail": "rrf_k must be greater than 0.",
+            }
+
+        if fusion_mode not in VALID_FUSION_MODES:
+            return {
+                "error": True,
+                "status": 422,
+                "detail": (
+                    f"Unsupported fusion_mode: {fusion_mode!r}. "
+                    f"Must be one of {sorted(VALID_FUSION_MODES)}."
+                ),
             }
 
         candidate_limit = min(
@@ -221,9 +265,105 @@ class HybridSearchService:
                 "mode": "keyword_only",
             }
 
-        # ── Mode 3: Hybrid (dense + sparse in parallel) ────────
+        # ── Mode 3a: Hybrid single-call (server-side RRF fusion) ───
+        # Both vectors present + server fusion requested → 1 round-trip to
+        # Qdrant Query API. Server-side RRF ignores vector/keyword weights.
+        if fusion_mode == "server_rrf":
+            # Both vectors are guaranteed non-None here (dense/sparse-only
+            # modes returned above); narrow the type for the type checker.
+            assert dense_vector is not None and sparse_vector is not None
+            _logger.info(
+                "Search mode: hybrid-single-call, collection=%s, limit=%d, "
+                "candidate_limit=%d, fusion=rrf",
+                collection, limit, candidate_limit,
+            )
+            result = await self._qdrant.query_hybrid(
+                collection=collection,
+                dense_vector=dense_vector,
+                sparse_vector=sparse_vector,
+                fusion="rrf",
+                limit=limit,
+                prefetch_limit=candidate_limit,
+                payload_filter=payload_filter,
+                with_payload=with_payload,
+            )
+            if result.get("error"):
+                _logger.error("Hybrid single-call search failed: %s", result.get("detail"))
+                return result
+
+            points = result.get("result", [])
+            return {
+                "result": _format_fused_results(
+                    points, limit=limit, score_type="rrf",
+                ),
+                # Server-side fusion returns a single fused list; per-branch
+                # candidate counts are not exposed by Qdrant here.
+                "vector_count": None,
+                "keyword_count": None,
+                "fused_count": min(len(points), limit),
+                "mode": "hybrid_single_call_rrf",
+            }
+
+        # ── Mode 3b: Hybrid batch retrieval + client-side weighted RRF ───
+        # Retrieve dense + sparse candidates in ONE batch request, then fuse
+        # in-process with the configured weights/rrf_k (best of both: 1
+        # round-trip, full weighted-fusion control).
+        #
+        # Batch retrieval is atomic from the application's perspective. If the
+        # batch request fails we return the error instead of falling back to
+        # separate dense/sparse requests: a batch failure is treated as a
+        # request/infrastructure error, not a signal to silently switch
+        # behavior. (Contrast with the 'client' mode below, which does degrade
+        # gracefully because it issues two independent requests.)
+        if fusion_mode == "batch_client_rrf":
+            assert dense_vector is not None and sparse_vector is not None
+            _logger.info(
+                "Search mode: hybrid-batch, collection=%s, limit=%d, candidate_limit=%d",
+                collection, limit, candidate_limit,
+            )
+            batch = await self._qdrant.query_batch(
+                collection=collection,
+                dense_vector=dense_vector,
+                sparse_vector=sparse_vector,
+                limit=candidate_limit,
+                payload_filter=payload_filter,
+                with_payload=with_payload,
+            )
+            if batch.get("error"):
+                _logger.error("Hybrid batch search failed: %s", batch.get("detail"))
+                return batch
+
+            dense_points = batch.get("dense", [])
+            sparse_points = batch.get("sparse", [])
+
+            _logger.info(
+                "Hybrid batch search: dense_count=%d, sparse_count=%d",
+                len(dense_points), len(sparse_points),
+            )
+
+            fused = rrf_fuse(
+                dense_points=dense_points,
+                sparse_points=sparse_points,
+                limit=limit,
+                vector_weight=vector_weight,
+                keyword_weight=keyword_weight,
+                rrf_k=rrf_k,
+            )
+            return {
+                "result": fused,
+                "vector_count": len(dense_points),
+                "keyword_count": len(sparse_points),
+                "fused_count": len(fused),
+                "mode": "hybrid_batch",
+            }
+
+        # ── Mode 3c: Hybrid "client" (default) ─────────────────
+        # Reached when fusion_mode == "client" (the two server modes above
+        # returned early). Two independent Qdrant requests in parallel, then
+        # weighted RRF in-process. This is the only hybrid mode that degrades
+        # gracefully (one branch can fail and the other still returns results).
         _logger.info(
-            "Search mode: hybrid, collection=%s, limit=%d, candidate_limit=%d",
+            "Search mode: hybrid-client, collection=%s, limit=%d, candidate_limit=%d",
             collection, limit, candidate_limit,
         )
 
