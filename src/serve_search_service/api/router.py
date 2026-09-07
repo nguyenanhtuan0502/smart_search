@@ -152,7 +152,7 @@ def _group_chunks_to_documents(
 
 @router.post("/v1/search/hybrid", response_model=HybridSearchResponse, tags=["search"])
 async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> dict[str, Any]:
-    """Hybrid search — nhận query text, tự embed rồi search Qdrant.
+    """Hybrid search — accept query text, embed it, then search Qdrant.
 
     Response:
         {"status": 200, "result": [{"document_id": "...", "rank_document": 1}, ...]}
@@ -209,6 +209,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
         keyword_weight=float(opts.keyword_weight),
         rrf_k=int(opts.rrf_k),
         candidate_multiplier=int(opts.candidate_multiplier),
+        fusion_mode=opts.fusion_mode,
         with_payload=True,  # Always need payload internally for document grouping
     )
     search_ms = (time.perf_counter() - search_start) * 1000
@@ -228,12 +229,12 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
         )
 
     _logger.info(
-        "Search completed in %.0fms | mode=%s, vector_count=%d, keyword_count=%d, fused_count=%d",
+        "Search completed in %.0fms | mode=%s, vector_count=%s, keyword_count=%s, fused_count=%s",
         search_ms,
         result.get("mode"),
-        result.get("vector_count", 0),
-        result.get("keyword_count", 0),
-        result.get("fused_count", 0),
+        result.get("vector_count"),
+        result.get("keyword_count"),
+        result.get("fused_count"),
     )
 
     # ── Step 4: Build document-level results ─────────────────
@@ -277,7 +278,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
             document_id_field=doc_id_field,
         )
 
-    # ── Step 5: Apply limit (số document trả về tối đa) ─────
+    # ── Step 5: Apply limit (max number of documents to return) ─────
     document_results = document_results[:int(payload.limit)]
 
     # ── Summary log ───────────────────────────────────────────
