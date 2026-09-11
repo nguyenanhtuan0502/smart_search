@@ -144,8 +144,17 @@ class HybridSearchService:
         candidate_multiplier: int = 5,
         fusion_mode: str = "client",
         with_payload: bool = True,
+        fuse_limit: int | None = None,
     ) -> dict[str, Any]:
-        """Execute search based on available vectors and return fused results."""
+        """Execute search based on available vectors and return fused results.
+
+        ``limit`` bounds how many results this method returns. ``fuse_limit``
+        (optional) is how many chunks to keep after fusion so a downstream
+        reranker can see a wider pool: when set (e.g. to the candidate pool
+        size), fusion keeps ``fuse_limit`` chunks instead of ``limit``, and the
+        final document-level cut to ``limit`` happens in the caller. When
+        ``fuse_limit`` is None the method keeps the legacy behavior (== limit).
+        """
 
         # ── Input validation ────────────────────────────────────
         if dense_vector is None and sparse_vector is None:
@@ -215,13 +224,18 @@ class HybridSearchService:
             MAX_CANDIDATE_LIMIT,
         )
 
+        # How many results to keep after fusion. Defaults to `limit` (legacy);
+        # when the caller asks for a wider rerank pool via `fuse_limit`, keep up
+        # to that many (never more than the candidate pool actually retrieved).
+        out_limit = min(fuse_limit, candidate_limit) if fuse_limit else limit
+
         # ── Mode 1: Dense-only ──────────────────────────────────
         if dense_vector is not None and sparse_vector is None:
             _logger.info("Search mode: dense-only, collection=%s, limit=%d", collection, limit)
             result = await self._qdrant.dense_search(
                 collection=collection,
                 vector=dense_vector,
-                limit=limit,
+                limit=out_limit,
                 payload_filter=payload_filter,
                 with_payload=with_payload,
             )
@@ -232,11 +246,11 @@ class HybridSearchService:
             points = result.get("result", [])
             return {
                 "result": _format_single_results(
-                    points, limit=limit, is_dense=True, score_type="similarity",
+                    points, limit=out_limit, is_dense=True, score_type="similarity",
                 ),
                 "vector_count": len(points),
                 "keyword_count": 0,
-                "fused_count": min(len(points), limit),
+                "fused_count": min(len(points), out_limit),
                 "mode": "vector_only",
             }
 
@@ -246,7 +260,7 @@ class HybridSearchService:
             result = await self._qdrant.sparse_search(
                 collection=collection,
                 sparse_vector=sparse_vector,
-                limit=limit,
+                limit=out_limit,
                 payload_filter=payload_filter,
                 with_payload=with_payload,
             )
@@ -257,11 +271,11 @@ class HybridSearchService:
             points = result.get("result", [])
             return {
                 "result": _format_single_results(
-                    points, limit=limit, is_dense=False, score_type="keyword",
+                    points, limit=out_limit, is_dense=False, score_type="keyword",
                 ),
                 "vector_count": 0,
                 "keyword_count": len(points),
-                "fused_count": min(len(points), limit),
+                "fused_count": min(len(points), out_limit),
                 "mode": "keyword_only",
             }
 
@@ -282,7 +296,11 @@ class HybridSearchService:
                 dense_vector=dense_vector,
                 sparse_vector=sparse_vector,
                 fusion="rrf",
-                limit=limit,
+                # Client-side RRF uses 1-based ranks (k + rank), while
+                # Qdrant uses 0-based positions (k + position). Offset k so
+                # both modes produce the same denominator for each rank.
+                rrf_k=rrf_k + 1,
+                limit=out_limit,
                 prefetch_limit=candidate_limit,
                 payload_filter=payload_filter,
                 with_payload=with_payload,
@@ -294,13 +312,13 @@ class HybridSearchService:
             points = result.get("result", [])
             return {
                 "result": _format_fused_results(
-                    points, limit=limit, score_type="rrf",
+                    points, limit=out_limit, score_type="rrf",
                 ),
                 # Server-side fusion returns a single fused list; per-branch
                 # candidate counts are not exposed by Qdrant here.
                 "vector_count": None,
                 "keyword_count": None,
-                "fused_count": min(len(points), limit),
+                "fused_count": min(len(points), out_limit),
                 "mode": "hybrid_single_call_rrf",
             }
 
@@ -344,7 +362,7 @@ class HybridSearchService:
             fused = rrf_fuse(
                 dense_points=dense_points,
                 sparse_points=sparse_points,
-                limit=limit,
+                limit=out_limit,
                 vector_weight=vector_weight,
                 keyword_weight=keyword_weight,
                 rrf_k=rrf_k,
@@ -421,11 +439,11 @@ class HybridSearchService:
             sparse_points = sparse_result.get("result", [])
             return {
                 "result": _format_single_results(
-                    sparse_points, limit=limit, is_dense=False, score_type="keyword",
+                    sparse_points, limit=out_limit, is_dense=False, score_type="keyword",
                 ),
                 "vector_count": 0,
                 "keyword_count": len(sparse_points),
-                "fused_count": min(len(sparse_points), limit),
+                "fused_count": min(len(sparse_points), out_limit),
                 "mode": "keyword_only_fallback",
             }
 
@@ -434,11 +452,11 @@ class HybridSearchService:
             dense_points = dense_result.get("result", [])
             return {
                 "result": _format_single_results(
-                    dense_points, limit=limit, is_dense=True, score_type="similarity",
+                    dense_points, limit=out_limit, is_dense=True, score_type="similarity",
                 ),
                 "vector_count": len(dense_points),
                 "keyword_count": 0,
-                "fused_count": min(len(dense_points), limit),
+                "fused_count": min(len(dense_points), out_limit),
                 "mode": "vector_only_fallback",
             }
 
@@ -454,7 +472,7 @@ class HybridSearchService:
         fused = rrf_fuse(
             dense_points=dense_points,
             sparse_points=sparse_points,
-            limit=limit,
+            limit=out_limit,
             vector_weight=vector_weight,
             keyword_weight=keyword_weight,
             rrf_k=rrf_k,

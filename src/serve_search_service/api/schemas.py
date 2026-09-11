@@ -4,6 +4,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ..application.search import MAX_CANDIDATE_LIMIT
+from ..settings import ServiceSettings
+
+# Load once at import so field defaults come from env (SERVE_SEARCH_*), while
+# remaining overridable per-request. String-typed fields keep string defaults.
+_settings = ServiceSettings()
+
 
 # ─────────────────────────────────────────────
 # Filter
@@ -11,13 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 
 class FilterCondition(BaseModel):
-    """A single filter condition for Qdrant payload filtering.
 
-    Examples:
-        {"key": "group_ids", "value": ["hr", "aiit"]}
-        {"key": "doc_status", "value": ["active"]}
-        {"key": "document_id", "value": "doc-001"}
-    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -48,31 +49,61 @@ class SearchOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     vector_weight: str = Field(
-        default="0.7", description="Dense vector weight in RRF fusion (0.0 to 1.0)"
+        default_factory=lambda: str(_settings.default_vector_weight),
+        description="Dense vector weight in RRF fusion (0.0 to 1.0)",
     )
     keyword_weight: str = Field(
-        default="0.3", description="Sparse (BM25) weight in RRF fusion (0.0 to 1.0)"
+        default_factory=lambda: str(_settings.default_keyword_weight),
+        description="Sparse (BM25) weight in RRF fusion (0.0 to 1.0)",
     )
     rrf_k: str = Field(
-        default="60", description="RRF constant k (1 to 200)"
+        default_factory=lambda: str(_settings.default_rrf_k),
+        description="RRF constant k (1 to 200)",
     )
     candidate_multiplier: str = Field(
-        default="5",
+        default_factory=lambda: str(_settings.default_candidate_multiplier),
         description="Multiply limit by this to get candidate pool size (2 to 20)",
     )
     fusion_mode: Literal["client", "server_rrf", "batch_client_rrf"] = Field(
-        default="client",
+        default_factory=lambda: _settings.default_fusion_mode,  # type: ignore[arg-type]
+        description="Fusion strategy for hybrid search",
+    )
+    auto_route: str = Field(
+        default_factory=lambda: str(_settings.default_auto_route).lower(),
+        description="Dynamic routing for document-code queries ('true'/'false')",
+    )
+    identifier_bonus: str = Field(
+        default_factory=lambda: str(_settings.default_identifier_bonus),
         description=(
-            "Fusion strategy for hybrid search:\n"
-            "- 'client' (default): dense + sparse in 2 parallel Qdrant calls, then "
-            "weighted RRF in-process (supports vector_weight/keyword_weight/rrf_k).\n"
-            "- 'server_rrf': single Qdrant Query API call with server-side RRF fusion "
-            "(weights ignored, requires Qdrant >= 1.10).\n"
-            "- 'batch_client_rrf': single Qdrant batch request retrieves dense + sparse "
-            "candidates, then weighted RRF in-process (keeps vector_weight/keyword_weight/"
-            "rrf_k, 1 round-trip, requires Qdrant >= 1.10)."
+            "Score added to a document (after rerank) when its docMaVanBan/docSoHieu "
+            "exactly matches the detected query identifier ."
         ),
     )
+    score_threshold: str | None = Field(
+        default_factory=lambda: (
+            None if _settings.default_score_threshold is None
+            else str(_settings.default_score_threshold)
+        ),
+        description=(
+            "Drop documents whose final rerank score is below this threshold "
+            "(0.0 to 1.0). Applies only when rerank is used. None disables filtering."
+        ),
+    )
+
+    @field_validator("score_threshold")
+    @classmethod
+    def validate_score_threshold_string(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            value = float(v)
+        except ValueError as err:
+            raise ValueError(
+                f"score_threshold must be a valid number string, got '{v}'"
+            ) from err
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"score_threshold must be between 0.0 and 1.0, got {value}")
+        return v
 
     @field_validator("vector_weight", "keyword_weight")
     @classmethod
@@ -105,6 +136,32 @@ class SearchOptions(BaseModel):
             raise ValueError(f"candidate_multiplier must be a valid integer string, got '{v}'")
         if not (2 <= value <= 20):
             raise ValueError(f"candidate_multiplier must be between 2 and 20, got {value}")
+        return v
+
+    @field_validator("auto_route")
+    @classmethod
+    def validate_auto_route_string(cls, v: str) -> str:
+        if v.strip().lower() not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                f"auto_route must be a boolean string (true/false), got '{v}'"
+            )
+        return v
+
+    def auto_route_enabled(self) -> bool:
+        """Parse auto_route string to bool for internal use."""
+        return self.auto_route.strip().lower() in {"true", "1", "yes"}
+
+    @field_validator("identifier_bonus")
+    @classmethod
+    def validate_identifier_bonus_string(cls, v: str) -> str:
+        try:
+            value = float(v)
+        except ValueError as err:
+            raise ValueError(
+                f"identifier_bonus must be a valid number string, got '{v}'"
+            ) from err
+        if not (0.0 <= value <= 5.0):
+            raise ValueError(f"identifier_bonus must be between 0.0 and 5.0, got {value}")
         return v
 
     @model_validator(mode="after")
@@ -232,30 +289,15 @@ class RerankOptions(BaseModel):
 # Search Request
 # ─────────────────────────────────────────────
 
-DEFAULT_COLLECTION = "EISO_COLLECTION"
-
-
 class HybridSearchRequest(BaseModel):
-    """Hybrid search request.
-
-    Example:
-        {
-            "query": "recruitment process for staff",
-            "collection": "eiso_collection",
-            "limit": 20,
-            "search_options": {...},
-            "filter": [{"key": "group_ids", "value": ["hr"]}],
-            "rerank": {"strategy": "hybrid", "top_chunks": 3}
-        }
-    """
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     query: str = Field(min_length=1, description="Query text (question / search keywords)")
     collection: str = Field(
-        default=DEFAULT_COLLECTION,
+        default_factory=lambda: _settings.default_collection,
         min_length=1,
-        description="Qdrant collection name (default: EISO_COLLECTION)",
+        description="Qdrant collection name (default from SERVE_SEARCH_DEFAULT_COLLECTION)",
     )
     limit: str = Field(default="10", description="Max number of documents to return (1-100)")
 
@@ -315,6 +357,22 @@ class HybridSearchRequest(BaseModel):
             raise ValueError(f"limit must be between 1 and 100, got {value}")
         return v
 
+    @model_validator(mode="after")
+    def validate_candidate_pool(self) -> "HybridSearchRequest":
+        # The candidate pool actually retrieved is
+        #   min(limit * candidate_multiplier, MAX_CANDIDATE_LIMIT).
+        # Reject (instead of silently capping) when the requested pool exceeds
+        # the hard cap, so the caller is not misled about how many candidates
+        # are used. Both fields validate individually first, so int() is safe.
+        opts = self.search_options or SearchOptions()
+        pool = int(self.limit) * int(opts.candidate_multiplier)
+        if pool > MAX_CANDIDATE_LIMIT:
+            raise ValueError(
+                f"limit * candidate_multiplier = {pool} exceeds the candidate pool "
+                f"cap of {MAX_CANDIDATE_LIMIT}; reduce limit or candidate_multiplier."
+            )
+        return self
+
 
 # ─────────────────────────────────────────────
 # Response
@@ -329,16 +387,6 @@ class DocumentResultItem(BaseModel):
 
 
 class HybridSearchResponse(BaseModel):
-    """Search response.
-
-    {
-        "status": 200,
-        "result": [
-            {"document_id": "doc-001", "rank_document": 1},
-            {"document_id": "doc-002", "rank_document": 2}
-        ]
-    }
-    """
 
     status: int = 200
     result: list[DocumentResultItem] = Field(default_factory=list)

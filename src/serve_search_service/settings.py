@@ -49,6 +49,18 @@ class ServiceSettings(BaseSettings):
     sparse_embedding_b: float = 0.75
     sparse_embedding_avg_len: float = 256.0
 
+    # Search / rerank defaults (overridable per-request via search_options).
+    default_collection: str = "EISO_COLLECTION"
+    default_vector_weight: float = 0.7
+    default_keyword_weight: float = 0.3
+    default_rrf_k: int = 5
+    default_candidate_multiplier: int = 5
+    default_fusion_mode: str = "client"
+    # Dynamic routing for document-code / số-hiệu queries (router_regex feature).
+    default_auto_route: bool = True
+    default_identifier_bonus: float = 0.5
+    default_score_threshold: float | None = None
+
     @field_validator("qdrant_url")
     @classmethod
     def strip_trailing_slash(cls, v: str) -> str:
