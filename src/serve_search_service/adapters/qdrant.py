@@ -107,6 +107,7 @@ class QdrantClient:
         dense_vector: list[float],
         sparse_vector: dict[str, Any],
         fusion: str = "rrf",
+        rrf_k: int | None = None,
         limit: int = 10,
         prefetch_limit: int = 50,
         payload_filter: dict[str, Any] | None = None,
@@ -136,9 +137,15 @@ class QdrantClient:
             dense_prefetch["filter"] = payload_filter
             sparse_prefetch["filter"] = payload_filter
 
+        fusion_query: dict[str, Any]
+        if fusion == "rrf" and rrf_k is not None:
+            fusion_query = {"rrf": {"k": rrf_k}}
+        else:
+            fusion_query = {"fusion": fusion}
+
         body: dict[str, Any] = {
             "prefetch": [dense_prefetch, sparse_prefetch],
-            "query": {"fusion": fusion},
+            "query": fusion_query,
             "limit": limit,
             "with_payload": with_payload,
             "with_vector": False,
@@ -146,8 +153,9 @@ class QdrantClient:
 
         url = f"/collections/{collection}/points/query"
         _logger.info(
-            "Query hybrid: url=%s%s, fusion=%s, dense_len=%d, sparse_indices=%d, prefetch_limit=%d",
-            self._base_url, url, fusion, len(dense_vector),
+            "Query hybrid: url=%s%s, fusion=%s, rrf_k=%s, dense_len=%d, "
+            "sparse_indices=%d, prefetch_limit=%d",
+            self._base_url, url, fusion, rrf_k, len(dense_vector),
             len(sparse_vector.get("indices", [])), prefetch_limit,
         )
 

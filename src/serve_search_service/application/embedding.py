@@ -37,6 +37,7 @@ class EmbeddingService:
         *,
         texts: list[str],
         input_type: str,
+        include_dense: bool = True,
         model: str | None = None,
         base_url: str | None = None,
         api_key: str | None = None,
@@ -46,16 +47,22 @@ class EmbeddingService:
         resolved_url = base_url or self._default_base_url
 
         if input_type == "query":
-            vectors, sparse_vectors = await asyncio.gather(
-                self._dense.embed_queries(
-                    texts,
-                    base_url=resolved_url,
-                    model=resolved_model,
-                    api_key=api_key,
-                    instruction=instruction,
-                ),
-                self._sparse.embed_queries(texts, instruction=instruction),
-            )
+            if include_dense:
+                vectors, sparse_vectors = await asyncio.gather(
+                    self._dense.embed_queries(
+                        texts,
+                        base_url=resolved_url,
+                        model=resolved_model,
+                        api_key=api_key,
+                        instruction=instruction,
+                    ),
+                    self._sparse.embed_queries(texts, instruction=instruction),
+                )
+            else:
+                sparse_vectors = await self._sparse.embed_queries(
+                    texts, instruction=instruction,
+                )
+                vectors = [()] * len(texts)
         else:
             vectors, sparse_vectors = await asyncio.gather(
                 self._dense.embed_documents(
@@ -76,7 +83,7 @@ class EmbeddingService:
                 zip(texts, vectors, sparse_vectors, strict=True)
             )
         )
-        dimensions = len(items[0].vector) if items else self._fallback_dimensions
+        dimensions = len(items[0].vector) if items and include_dense else 0
         self._logger.info(
             "Embedded %d text(s) as %s with %s (+sparse %s)",
             len(items),
