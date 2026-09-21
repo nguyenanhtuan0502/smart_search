@@ -1,50 +1,25 @@
-# =============================================================================
-# .gitlab-ci.yml — serve-search-service
-# 3 stage: containerize -> deliver -> deploy.
-#
-# Logic dung chung nam trong template cua repo genai/iac/gitlab-ci:
-#   .containerize  -> podman login $REGISTRY_HOST -u builder
-#   .deliver       -> skopeo copy docker-archive:...tar -> docker://$IMG_SRC
-#   .deploy        -> kubeconfig tu $OCP_GENAI_KUBECONFIG
-#   .profile:genai -> PROJECT=genai, DEPLOY_NAMESPACE=genai
-#
-# Bon bien do group `genai` cung cap, KHONG khai o day:
-#   REGISTRY_HOST  REGISTRY_PASS  OCP_GENAI_TOKEN  OCP_GENAI_KUBECONFIG
-# =============================================================================
+# GitLab CI — serve-search-service
+# Workflow equivalent to mas-index-service and mas-search-service.
 
-# =============================================================================
-# KHONG dung `include: project:` — co chu y.
-#
-# GitLab phan giai `include` bang quyen cua NGUOI KICH HOAT pipeline. Dev khong
-# co quyen doc `genai/iac/gitlab-ci` thi buoc gop cau hinh that bai, va GitLab
-# tao mot pipeline RONG roi danh dau loi — truoc ca khi `workflow` duoc danh gia,
-# nen khong luat nao chan duoc. Chep template vao day de khong con phu thuoc do.
-#
-# Dev khong duoc cap quyen vao project do, nen day la cach lam CHINH THUC chu
-# khong phai giai phap tam.
-#
-# Bon template duoi day sao tu genai/iac/gitlab-ci (.stages.yml, .rules.yml),
-# co hai khac biet CO Y:
-#   - .containerize: bo 2 dong go roi `cat ~/.docker/config.json` va `echo $HOME`
-#     (in noi dung file dang nhap registry ra log, khong phuc vu gi)
-#   - .deploy: bo `script` goc (helm upgrade ./helm-charts) — thu muc do khong
-#     ton tai trong repo service, va job deploy da ghi de bang `oc set image`
-#
-# Doi lai: template cua org sua thi file nay KHONG tu nhan duoc. Dinh ky chay
-#   ./check-template-drift.sh
-# de doi chieu voi ban moi nhat trong SourceCode/gitlab-ci/.
-# =============================================================================
-
-.profile:genai:
-  variables:
-    DEPLOY_NAMESPACE: genai
-    PROJECT: genai
+workflow:
+  rules:
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH =~ /^(dev|develop)$/'
+      variables:
+        DEPLOY_ENV: "dev"
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH == "uat"'
+      variables:
+        DEPLOY_ENV: "uat"
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH =~ /^release\/.+$/'
+      variables:
+        DEPLOY_ENV: "rel"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      variables:
+        DEPLOY_ENV: "exp"
+    - when: never
 
 .containerize:
   stage: containerize
   image: ebit.tpb.vn/podman/stable:v3.4.0
-  variables:
-    IMAGE_TAG: $CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID
   before_script:
     - echo $REGISTRY_PASS | podman login --tls-verify=false $REGISTRY_HOST --username builder --password-stdin
 
@@ -54,10 +29,6 @@
   variables:
     GIT_STRATEGY: none
     TOKEN: $OCP_GENAI_TOKEN
-  before_script:
-    - ls -lh ./image_folder/$MODULE.tar
-  script:
-    - skopeo copy docker-archive:./image_folder/$MODULE.tar docker://$IMG_SRC --dest-creds=devops:$TOKEN --dest-tls-verify=false
 
 .deploy:
   stage: deploy
@@ -68,174 +39,128 @@
   before_script:
     - echo $OCP_GENAI_KUBECONFIG | base64 -d > kubeconfig.yml
 
-# --- Chan tu goc: khong tao pipeline cho nhanh la ---------------------------
-# Khai `workflow` o file chinh se DE LEN `workflow` cua file include.
-# Can khai o day vi `.rules.yml` lay theo `ref` — noi dung ben do co the khac
-# va da chung minh la khong loc nhanh: nhanh feature/* van sinh pipeline.
-#
-# Chan o tang `workflow` chu khong chi o tang job: neu chi chan job thi GitLab
-# van tao pipeline rong roi bao "No stages / jobs" — dung cai loi `error` dang
-# thay tren nhanh feature/*.
-#
-# KHONG cho merge_request_event: cac job deu khong chay tren MR, cho phep chi
-# tao them pipeline rong va lam MR treo o "Checking pipeline status".
-workflow:
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(dev|develop|sit|uat|release.*)$/'
-    - if: '$CI_PIPELINE_SOURCE == "web"'
-    - when: never
-
 variables:
   MODULE: serve-search-service
+  PROJECT: genai-private
   GIT_STRATEGY: clone
-  IMG_SRC: $REGISTRY_HOST/$PROJECT/$MODULE:$CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID
   REGISTRY_INTERNAL: "image-registry.openshift-image-registry.svc:5000"
+  TAG: "$DEPLOY_ENV-$CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID"
+  BUILD_ID: "$MODULE-$TAG"
+  IMG_SRC: $REGISTRY_HOST/$PROJECT/$MODULE:$TAG
+  ISTAG: "$MODULE:$TAG"
+  IMAGE_FILE: "$BUILD_ID.tar"
+  OUT_DIR: "$MODULE-$DEPLOY_ENV"
 
 stages:
   - containerize
   - deliver
   - deploy
 
-# --- Chan nhanh, khong phu thuoc workflow.rules cua repo dung chung ----------
-# `.rules:post-merge` cua genai/iac/gitlab-ci chi kiem tra CI_PIPELINE_SOURCE,
-# viec loc nhanh nam o `workflow.rules` — ma file do ta pin theo ref nen noi dung
-# co the doi ma khong biet. Dinh nghia lai o day de dev push nhanh rieng thi
-# pipeline khong chay, du rule ben kia co noi long den dau.
-.rules:shared-branches:
+preflight:
+  stage: .pre
+  tags: [podman]
+  variables:
+    GIT_STRATEGY: none
   rules:
-    # Push: chi cac nhanh chung.
-    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH =~ /^(dev|develop|sit|uat|release.*)$/'
+    - if: '$DEPLOY_ENV =~ /^(dev|uat|rel|exp)$/'
       when: on_success
-    # Web (Run pipeline): cho phep moi nhanh, de con test thu cong.
-    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - when: never
+  script:
+    - ': "${MODULE:?MODULE chua duoc dat}"'
+    - ': "${PROJECT:?PROJECT chua duoc dat}"'
+    - ': "${DEPLOY_ENV:?DEPLOY_ENV chua duoc dat}"'
+
+.gate:always:
+  rules:
+    - if: '$DEPLOY_ENV =~ /^(dev|uat|rel|exp)$/'
+      when: on_success
+    - when: never
+
+.gate:deploy:
+  rules:
+    - if: '$DEPLOY_ENV == "dev"'
       when: on_success
     - when: never
 
 containerize:build:
-  stage: containerize
   extends:
-    - .rules:shared-branches
     - .containerize
-    - .profile:genai
-  tags:
-    - podman
+    - .gate:always
+  tags: [podman]
+  interruptible: true
   script:
-    # Chỉ truyền --build-arg khi biến PIP_INDEX_URL có giá trị; không thì dùng
-    # giá trị mặc định trong Dockerfile-deploy. Khai biến rỗng mà vẫn truyền vào
-    # sẽ ghi đè mặc định thành chuỗi rỗng và làm hỏng bước pip install.
     - |
       BUILD_ARGS=""
       if [ -n "$PIP_INDEX_URL" ]; then
         BUILD_ARGS="--build-arg PIP_INDEX_URL=$PIP_INDEX_URL"
-        echo "Dùng PIP_INDEX_URL từ biến CI"
-      else
-        echo "Dùng PIP_INDEX_URL mặc định trong Dockerfile-deploy"
       fi
       podman build -f ./Dockerfile-deploy $BUILD_ARGS -t $IMG_SRC .
     - echo "IMAGE = $IMG_SRC"
-    - echo "IMAGE_TAG (dung cho manifests.yaml) = $CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID"
-    - mkdir -p image_folder
-    - rm -f ./image_folder/$MODULE.tar
-    - podman save -o ./image_folder/$MODULE.tar $IMG_SRC
-    - ls -lh ./image_folder/$MODULE.tar
-  # Runner tag `podman` la SHELL executor: image nam lai tren dia VM sau moi lan
-  # build. Khong don thi VM day dia sau vai chuc pipeline.
+    - rm -rf "$OUT_DIR"
+    - mkdir -p "$OUT_DIR"
+    - podman save -o "$OUT_DIR/$IMAGE_FILE" "$IMG_SRC"
+    - test -s "$OUT_DIR/$IMAGE_FILE"
+    - ls -lh "$OUT_DIR/$IMAGE_FILE"
+    - echo "$CI_PROJECT_URL/-/jobs/$CI_JOB_ID/artifacts/raw/$OUT_DIR/$IMAGE_FILE"
   after_script:
     - podman rmi -f $IMG_SRC || true
-    # KHONG dung `podman image prune -f` tran lan: no xoa ca lop trung gian cua
-    # multi-stage build, tuc la xoa sach cache -> lan build sau tai lai tu dau.
-    # Chi don thu cu hon 3 ngay.
     - podman image prune -f --filter until=72h || true
-  interruptible: true
   artifacts:
-    expire_in: 10 mins
+    expire_in: 7 days
     paths:
-      - ./image_folder
+      - "serve-search-service-*"
 
-# --- Xuất tag ra artifact để xem/tải về --------------------------------------
-# GitLab in lệnh nguyên trạng nên log không bao giờ hiện giá trị $IMG_SRC.
-# Job này ghi tag ra file, giữ 30 ngày, tải về ở Job -> Artifacts -> Download.
-# KHÔNG dùng artifacts:reports:dotenv — biến IMAGE_TAG sẽ đè lên biến cùng tên
-# mà deploy:set-image tự khai, gây lỗi khó tìm.
-export:image-tag:
-  stage: deliver
-  tags:
-    - podman
-  extends:
-    - .rules:shared-branches
-    - .profile:genai
-  variables:
-    GIT_STRATEGY: none
-  needs: ["containerize:build"]
-  dependencies: []
-  script:
-    - |
-      TAG="$CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID"
-      {
-        echo "IMAGE_TAG=$TAG"
-        echo "IMAGE_INTERNAL=$REGISTRY_INTERNAL/$PROJECT/$MODULE:$TAG"
-        echo "IMAGE_REGISTRY=$REGISTRY_HOST/$PROJECT/$MODULE:$TAG"
-        echo "MODULE=$MODULE"
-        echo "NAMESPACE=$PROJECT"
-        echo "BRANCH=$CI_COMMIT_REF_NAME"
-        echo "COMMIT=$CI_COMMIT_SHA"
-        echo "PIPELINE_IID=$CI_PIPELINE_IID"
-        echo "PIPELINE_URL=$CI_PIPELINE_URL"
-      } | tee image-tag.env
-  artifacts:
-    name: "image-tag-$CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID"
-    expire_in: 30 days
-    paths:
-      - image-tag.env
-
-# --- Nạp file .tar vào registry nội bộ của OCP -------------------------------
-# Template .deliver tự chạy:
-#   skopeo copy docker-archive:./image_folder/$MODULE.tar docker://$IMG_SRC \
-#     --dest-creds=devops:$OCP_GENAI_TOKEN --dest-tls-verify=false
 deliver:upload-image:
-  stage: deliver
   extends:
     - .deliver
-    - .rules:shared-branches
-    - .profile:genai
+    - .gate:always
   needs: ["containerize:build"]
   dependencies:
     - "containerize:build"
+  script:
+    - test -s "./$OUT_DIR/$IMAGE_FILE"
+    - skopeo copy docker-archive:./$OUT_DIR/$IMAGE_FILE docker://$IMG_SRC --dest-creds=devops:$TOKEN --dest-tls-verify=false
+    - |
+      echo "Image da len registry: $REGISTRY_INTERNAL/$PROJECT/$ISTAG"
+      echo "oc set image deployment/$MODULE $MODULE=$REGISTRY_INTERNAL/$PROJECT/$ISTAG -n $PROJECT"
+      echo "oc rollout status deployment/$MODULE -n $PROJECT"
 
-# --- Cập nhật Deployment sang image mới --------------------------------------
 deploy:set-image:
-  # Hai pipeline chay song song se tranh nhau `oc set image` -> rollout day nhau.
-  resource_group: deploy-serve-search-service
   extends:
-    - .rules:shared-branches
-    - .profile:genai
     - .deploy
-  variables:
-    GIT_STRATEGY: none
-    IMAGE_TAG: "${MODULE}:${CI_COMMIT_SHORT_SHA}.${CI_PIPELINE_IID}"
+    - .gate:deploy
+  needs: ["deliver:upload-image"]
+  dependencies: []
+  resource_group: deploy-serve-search-service
   script:
     - |
-      # OCP tao ImageStreamTag BAT DONG BO sau khi skopeo day xong — tre vai giay.
-      # Kiem tra mot phat ngay sau job `deliver` la truot, du tag that su se co.
-      # Hoi thang dung ten tag, khong `get` toan bo roi grep: dinh dang cua
-      # `-o name` khac nhau giua cac ban oc, va grep -qx doi khop nguyen dong.
-      echo "Cho imagestreamtag: $IMAGE_TAG"
+      CURRENT=$(oc get deployment/$MODULE -n $PROJECT \
+        -o jsonpath="{.spec.template.spec.containers[?(@.name=='$MODULE')].image}" 2>/dev/null || true)
+      if [ -z "$CURRENT" ]; then
+        echo "Khong doc duoc image hien tai cua deployment/$MODULE trong namespace $PROJECT."
+        exit 1
+      fi
+      CURRENT_TAG="${CURRENT##*:}"
+      case "$CURRENT_TAG" in
+        dev-*) echo "Deployment van dung dev; cho phep cap nhat." ;;
+        *)
+          echo "DUNG LAI: Deployment dang tro toi $CURRENT, khong phai dev."
+          echo "Image moi van da len registry: $REGISTRY_INTERNAL/$PROJECT/$ISTAG"
+          exit 1 ;;
+      esac
+    - |
       FOUND=0
       for i in $(seq 1 30); do
-        if oc get imagestreamtag "$IMAGE_TAG" -n "$PROJECT" >/dev/null 2>&1; then
-          echo "Da thay sau $((i*3))s"; FOUND=1; break
+        if oc get imagestreamtag "$ISTAG" -n "$PROJECT" >/dev/null 2>&1; then
+          FOUND=1
+          break
         fi
         sleep 3
       done
       if [ "$FOUND" != 1 ]; then
-        echo "Khong thay $IMAGE_TAG trong imagestream sau 90s. Cac tag dang co:"
-        oc get imagestreamtag -n "$PROJECT" 2>&1 | grep "$MODULE" || echo "  (khong co tag nao cua $MODULE)"
+        echo "Khong thay $ISTAG trong imagestream sau 90s."
         exit 1
       fi
-
-      oc set image deployment/$MODULE $MODULE=$REGISTRY_INTERNAL/$PROJECT/$IMAGE_TAG -n $PROJECT
-    # Dòng dưới KHÔNG có trong bản của tool-analysis-web.
-    # Thiếu nó, job báo xanh ngay khi `oc set image` xong — chưa biết pod có lên
-    # được hay không. Image hỏng thì pipeline vẫn xanh còn service thì chết.
+      oc set image deployment/$MODULE $MODULE=$REGISTRY_INTERNAL/$PROJECT/$ISTAG -n $PROJECT
     - oc rollout status deployment/$MODULE -n $PROJECT --timeout=600s
     - oc get pods -n $PROJECT -l app=$MODULE -o wide
