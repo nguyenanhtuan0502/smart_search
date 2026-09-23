@@ -1,10 +1,20 @@
 """Public HTTP routes for the search service."""
 
+import asyncio
 import time
+from collections import Counter
+from dataclasses import asdict
 from typing import Any
 
 from fastapi import APIRouter, Request, status
 
+from ..adapters.qdrant import QdrantClient
+from ..application.citation import (
+    CitationConfig,
+    build_citations,
+    idf_from_probe,
+    query_token_indices,
+)
 from ..application.embedding import EmbeddingService
 from ..application.rerank_service import RerankService
 from ..application.router_regex import detect, normalize_identifier
@@ -13,6 +23,7 @@ from ..domain.embedding import EmbedderUnavailableError, EmbeddingResult
 from ..logging import TraceIdAdapter, get_logger
 from .errors import ApiError
 from .schemas import (
+    CitationOptions,
     FilterCondition,
     HybridSearchRequest,
     HybridSearchResponse,
@@ -25,6 +36,20 @@ router = APIRouter()
 
 # Singleton rerank service (stateless, safe to share)
 _rerank_service = RerankService()
+
+_background_probes: set[asyncio.Task[dict[int, float]]] = set()
+
+
+async def _probe_idf(
+    qdrant_client: QdrantClient, collection: str, indices: list[int]
+) -> dict[int, float]:
+    if not indices:
+        return {}
+    try:
+        return await qdrant_client.probe_sparse_idf(collection, indices)
+    except Exception:
+        _logger.exception("IDF probe raised, falling back to flat weights.")
+        return {}
 
 
 def _extract_vectors(
@@ -195,6 +220,17 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
     total_start = time.perf_counter()
 
     opts = payload.search_options or SearchOptions()
+
+    idf_task: asyncio.Task[dict[int, float]] | None = None
+    if opts.citation_enabled():
+        query_tokens, query_indices = query_token_indices(payload.query)
+        idf_task = asyncio.create_task(
+            _probe_idf(request.app.state.qdrant_client, payload.collection, query_indices)
+        )
+        _background_probes.add(idf_task)
+        idf_task.add_done_callback(_background_probes.discard)
+    else:
+        _logger.info("Citation disabled for this request (search_options.citation=false)")
 
     # Detect before embedding so identifier queries can use their canonical,
     # separator-preserving form for sparse retrieval.
@@ -403,11 +439,65 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
     # ── Step 5: Apply limit (số document trả về tối đa) ─────
     document_results = document_results[:int(payload.limit)]
 
+    citation_ms = 0.0
+    if idf_task is not None and not document_results:
+        _logger.info("Citation skipped: no documents to cite")
+    if idf_task is not None and document_results:
+        citation_start = time.perf_counter()
+        try:
+            cite = payload.citation_options or CitationOptions()
+            probed = await idf_task
+            idf_wait_ms = (time.perf_counter() - citation_start) * 1000
+            config = CitationConfig(
+                tau=float(cite.idf_tau),
+                top_m=int(cite.top_keywords),
+                min_cohesion=float(cite.min_cohesion),
+                window_chars=int(cite.window_chars),
+                companion_ratio=float(cite.companion_ratio),
+                max_chunks=int(cite.max_chunks),
+                semantic_gate=float(cite.semantic_gate),
+                max_phrase_tokens=int(cite.max_phrase_tokens),
+                nested_ratio=float(cite.nested_ratio),
+            )
+            citations = build_citations(
+                document_results,
+                chunk_results,
+                payload.query,
+                idf_from_probe(query_tokens, query_indices, probed),
+                document_id_field=doc_id_field,
+                config=config,
+            )
+            for doc in document_results:
+                block = citations.get(doc["document_id"])
+                if block:
+                    doc["citation_tier"] = block["tier"]
+                    doc["citations"] = block["citations"]
+            citation_ms = (time.perf_counter() - citation_start) * 1000
+            tiers = Counter(block["tier"] for block in citations.values())
+            snippets = [c for block in citations.values() for c in block["citations"]]
+            _logger.info(
+                "Citations built in %.0fms (idf wait %.0fms) | documents=%d, tiers=%s, "
+                "snippets=%d, highlights=%d, probed_tokens=%d/%d | config=%s",
+                citation_ms,
+                idf_wait_ms,
+                len(document_results),
+                dict(tiers),
+                len(snippets),
+                sum(len(c["highlights"]) for c in snippets),
+                len(probed),
+                len(query_indices),
+                asdict(config),
+            )
+        except Exception:
+            citation_ms = (time.perf_counter() - citation_start) * 1000
+            _logger.exception("Citation building failed, returning results without it.")
+
     # ── Summary log ───────────────────────────────────────────
     total_ms = (time.perf_counter() - total_start) * 1000
     _logger.info(
-        "Request completed in %.0fms | embed=%.0fms, search=%.0fms, documents=%d",
-        total_ms, embed_ms, search_ms, len(document_results),
+        "Request completed in %.0fms | embed=%.0fms, search=%.0fms, citation=%.0fms, "
+        "documents=%d",
+        total_ms, embed_ms, search_ms, citation_ms, len(document_results),
     )
 
     return {

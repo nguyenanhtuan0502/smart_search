@@ -52,6 +52,7 @@ def rrf_fuse(
             "score_type": "rrf",
             "vector_rank": rank,
             "keyword_rank": None,
+            "dense_score": p.get("score"),
         }
 
     for rank, p in enumerate(sparse_points, start=1):
@@ -67,6 +68,7 @@ def rrf_fuse(
                 "score_type": "rrf",
                 "vector_rank": None,
                 "keyword_rank": rank,
+                "dense_score": None,
             }
 
     fused = sorted(scores.values(), key=lambda x: x["score"], reverse=True)
@@ -89,6 +91,7 @@ def _format_single_results(
             "score_type": score_type,
             "vector_rank": rank if is_dense else None,
             "keyword_rank": rank if not is_dense else None,
+            "dense_score": p.get("score", 0) if is_dense else None,
         }
         for rank, p in enumerate(points[:limit], start=1)
     ]
@@ -114,6 +117,7 @@ def _format_fused_results(
             "score_type": score_type,
             "vector_rank": None,
             "keyword_rank": None,
+            "dense_score": None,
         }
         for p in points[:limit]
     ]

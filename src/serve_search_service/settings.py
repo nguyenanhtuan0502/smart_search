@@ -61,6 +61,17 @@ class ServiceSettings(BaseSettings):
     default_identifier_bonus: float = 0.5
     default_score_threshold: float | None = None
 
+    default_citation: bool = True
+    citation_idf_tau: float = 2.5
+    citation_top_keywords: int = 6
+    citation_min_cohesion: float = 0.6
+    citation_window_chars: int = 400
+    citation_companion_ratio: float = 0.7
+    citation_max_chunks: int = 5
+    citation_semantic_gate: float = 0.5
+    citation_max_phrase_tokens: int = 6
+    citation_nested_ratio: float = 0.9
+
     @field_validator("qdrant_url")
     @classmethod
     def strip_trailing_slash(cls, v: str) -> str:

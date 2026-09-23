@@ -2,7 +2,14 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from ..application.search import MAX_CANDIDATE_LIMIT
 from ..settings import ServiceSettings
@@ -79,6 +86,13 @@ class SearchOptions(BaseModel):
             "exactly matches the detected query identifier ."
         ),
     )
+    citation: str = Field(
+        default_factory=lambda: str(_settings.default_citation).lower(),
+        description=(
+            "Attach highlighted snippets to each document result ('true'/'false'). "
+            "Built from the chunks the search already returned; ranking is unaffected."
+        ),
+    )
     score_threshold: str | None = Field(
         default_factory=lambda: (
             None if _settings.default_score_threshold is None
@@ -150,6 +164,18 @@ class SearchOptions(BaseModel):
     def auto_route_enabled(self) -> bool:
         """Parse auto_route string to bool for internal use."""
         return self.auto_route.strip().lower() in {"true", "1", "yes"}
+
+    @field_validator("citation")
+    @classmethod
+    def validate_citation_string(cls, v: str) -> str:
+        if v.strip().lower() not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                f"citation must be a boolean string (true/false), got '{v}'"
+            )
+        return v
+
+    def citation_enabled(self) -> bool:
+        return self.citation.strip().lower() in {"true", "1", "yes"}
 
     @field_validator("identifier_bonus")
     @classmethod
@@ -285,6 +311,80 @@ class RerankOptions(BaseModel):
         return self._parse_weights(self.weights)
 
 
+_CITATION_BOUNDS: dict[str, tuple[float, float, bool]] = {
+    "idf_tau": (0.0, 20.0, False),
+    "top_keywords": (1, 20, True),
+    "min_cohesion": (0.0, 1.0, False),
+    "window_chars": (100, 5000, True),
+    "companion_ratio": (0.0, 1.0, False),
+    "max_chunks": (1, 20, True),
+    "semantic_gate": (0.0, 1.0, False),
+    "max_phrase_tokens": (1, 10, True),
+    "nested_ratio": (0.5, 1.0, False),
+}
+
+
+class CitationOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    idf_tau: str = Field(
+        default_factory=lambda: str(_settings.citation_idf_tau),
+        description="Minimum IDF for a term or phrase to be highlighted (0 to 20)",
+    )
+    top_keywords: str = Field(
+        default_factory=lambda: str(_settings.citation_top_keywords),
+        description="Maximum number of highlighted keywords (1 to 20)",
+    )
+    min_cohesion: str = Field(
+        default_factory=lambda: str(_settings.citation_min_cohesion),
+        description=(
+            "Keep a phrase only if it occurs in at least this share of the chunks "
+            "containing its rarest word (0.0 to 1.0)"
+        ),
+    )
+    window_chars: str = Field(
+        default_factory=lambda: str(_settings.citation_window_chars),
+        description="Snippet length in characters around the keywords (100 to 5000)",
+    )
+    companion_ratio: str = Field(
+        default_factory=lambda: str(_settings.citation_companion_ratio),
+        description="Extra chunk needs this fraction of the anchor's cosine score (0.0 to 1.0)",
+    )
+    max_chunks: str = Field(
+        default_factory=lambda: str(_settings.citation_max_chunks),
+        description="Maximum cited chunks per document (1 to 20)",
+    )
+    semantic_gate: str = Field(
+        default_factory=lambda: str(_settings.citation_semantic_gate),
+        description="Cosine score for a keyword-free anchor to count as 'semantic' (0.0 to 1.0)",
+    )
+    max_phrase_tokens: str = Field(
+        default_factory=lambda: str(_settings.citation_max_phrase_tokens),
+        description="Longest query phrase considered, in syllables (1 to 10)",
+    )
+    nested_ratio: str = Field(
+        default_factory=lambda: str(_settings.citation_nested_ratio),
+        description=(
+            "A phrase yields to a one-syllable-longer phrase found in this share "
+            "of its chunks (0.5 to 1.0)"
+        ),
+    )
+
+    @field_validator(*_CITATION_BOUNDS)
+    @classmethod
+    def validate_bounds(cls, v: str, info: ValidationInfo) -> str:
+        name = info.field_name or ""
+        low, high, integer = _CITATION_BOUNDS[name]
+        try:
+            value = int(v) if integer else float(v)
+        except ValueError as err:
+            kind = "an integer" if integer else "a number"
+            raise ValueError(f"{name} must be {kind} string, got '{v}'") from err
+        if not (low <= value <= high):
+            raise ValueError(f"{name} must be between {low} and {high}, got {value}")
+        return v
+
+
 # ─────────────────────────────────────────────
 # Search Request
 # ─────────────────────────────────────────────
@@ -333,6 +433,10 @@ class HybridSearchRequest(BaseModel):
         default=None,
         description="Document-level reranking options",
     )
+    citation_options: CitationOptions | None = Field(
+        default=None,
+        description="Citation tuning; used only when search_options.citation is true",
+    )
     udf: list[UdfField] | None = Field(
         default=None,
         description="User-defined fields in MAS format: [{key, value}, ...]",
@@ -379,11 +483,40 @@ class HybridSearchRequest(BaseModel):
 # ─────────────────────────────────────────────
 
 
+class CitationHighlight(BaseModel):
+    start: int
+    end: int
+
+
+class CitationItem(BaseModel):
+    chunk_id: str
+    chunk_index: int | None = None
+    text: str = Field(description="Plaintext snippet, truncated to the window size")
+    highlights: list[CitationHighlight] = Field(default_factory=list)
+    match_count: int = Field(
+        default=0,
+        description="Keyword matches in the whole chunk, including any cut from the window",
+    )
+    truncated: bool = False
+    is_anchor: bool = Field(
+        default=False, description="The chunk the document surfaced on"
+    )
+
+
 class DocumentResultItem(BaseModel):
     """A document-level result."""
 
     document_id: str
     rank_document: int = Field(description="Document rank (1-based)")
+    citation_tier: str | None = Field(
+        default=None,
+        description=(
+            "How the snippets were chosen: 'literal' (keyword matches), 'semantic' "
+            "(strong dense match, no keywords), 'whole' (chunk shown as-is), or "
+            "'title_only' (no citable chunk). None when citation is off."
+        ),
+    )
+    citations: list[CitationItem] = Field(default_factory=list)
 
 
 class HybridSearchResponse(BaseModel):
