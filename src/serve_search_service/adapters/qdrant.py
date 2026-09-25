@@ -1,5 +1,6 @@
 """Qdrant adapter — HTTP calls to Qdrant for search operations."""
 
+import time
 from typing import Any
 
 import httpx
@@ -336,3 +337,71 @@ class QdrantClient:
 
         result: dict[str, Any] = resp.json()
         return result
+
+    async def probe_sparse_idf(
+        self,
+        collection: str,
+        token_indices: list[int],
+        *,
+        samples: int = 3,
+    ) -> dict[int, float]:
+        if not token_indices:
+            return {}
+
+        body = {
+            "searches": [
+                {
+                    "query": {"indices": [index], "values": [1.0]},
+                    "using": "sparse",
+                    "limit": samples,
+                    "with_vector": True,
+                    "with_payload": False,
+                }
+                for index in token_indices
+            ]
+        }
+        url = f"/collections/{collection}/points/query/batch"
+        start = time.perf_counter()
+
+        try:
+            resp = await self._client.post(url, json=body)
+            resp.raise_for_status()
+        except (httpx.HTTPError, httpx.RequestError) as e:
+            _logger.warning(
+                "IDF probe failed for collection=%s (%s); falling back to flat weights.",
+                collection, e,
+            )
+            return {}
+
+        try:
+            batches = resp.json()["result"]
+        except (KeyError, ValueError) as e:
+            _logger.warning("IDF probe returned an unexpected body: %s", e)
+            return {}
+
+        idf: dict[int, float] = {}
+        for index, batch in zip(token_indices, batches, strict=False):
+            ratios: list[float] = []
+            for point in (batch or {}).get("points", []):
+                sparse = (point.get("vector") or {}).get("sparse") or {}
+                stored = dict(
+                    zip(sparse.get("indices", []), sparse.get("values", []), strict=False)
+                ).get(index)
+                if stored:
+                    ratios.append(point.get("score", 0.0) / stored)
+            if ratios:
+                idf[index] = sum(ratios) / len(ratios)
+
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        if idf:
+            _logger.info(
+                "IDF probe resolved %d/%d token(s) in %.0fms",
+                len(idf), len(token_indices), elapsed_ms,
+            )
+        else:
+            _logger.warning(
+                "IDF probe resolved 0/%d token(s) in collection=%s (%.0fms); "
+                "nothing will be highlighted.",
+                len(token_indices), collection, elapsed_ms,
+            )
+        return idf
