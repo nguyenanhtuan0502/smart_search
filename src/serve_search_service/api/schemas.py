@@ -34,6 +34,14 @@ class FilterCondition(BaseModel):
         min_length=1,
         description="Value or list of values to match (OR within a condition)",
     )
+    match_type: Literal["value", "text"] = Field(
+        default="value",
+        description=(
+            "Filter match type: 'value' for exact match (default), "
+            "'text' for text/contains match. "
+            "Used by must_not_conditions."
+        ),
+    )
 
 
 class UdfField(BaseModel):
@@ -101,6 +109,24 @@ class SearchOptions(BaseModel):
         description=(
             "Drop documents whose final rerank score is below this threshold "
             "(0.0 to 1.0). Applies only when rerank is used. None disables filtering."
+        ),
+    )
+    filter_conditions: list["FilterCondition"] | None = Field(
+        default=None,
+        description=(
+            "Additional filter conditions to merge with top-level 'filter' field. "
+            "Both are combined with AND logic. "
+            "Example: [{key: 'group_ids', value: ['hr']}]"
+        ),
+    )
+    must_not_conditions: list["FilterCondition"] | None = Field(
+        default=None,
+        description=(
+            "Exclusion filter conditions (must_not). Documents matching ANY of these "
+            "conditions will be excluded from results. "
+            "For match_type='text' (substring), values must be tokenized according to "
+            "the collection's text index tokenizer (e.g. 'vv' not 'v/v' if tokenizer='word'). "
+            "Example: [{key: 'docTenVB', value: 'vv', match_type: 'text'}]"
         ),
     )
 
@@ -212,7 +238,7 @@ class RerankOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     strategy: Literal["maxp", "top_m_mean", "hit_count", "rrf", "hybrid"] = Field(
-        default="hybrid",
+        default_factory=lambda: _settings.default_rerank_strategy,  # type: ignore[arg-type]
         description="Rerank strategy: maxp | top_m_mean | hit_count | rrf | hybrid",
     )
     weights: str | None = Field(
@@ -223,17 +249,19 @@ class RerankOptions(BaseModel):
         ),
     )
     mean_m: str = Field(
-        default="3", description="Top M chunks for top_m_mean strategy"
+        default_factory=lambda: str(_settings.default_rerank_mean_m),
+        description="Top M chunks for top_m_mean strategy"
     )
     rrf_k: str = Field(
-        default="60", description="RRF k constant for rrf/hybrid strategy"
+        default_factory=lambda: str(_settings.default_rerank_rrf_k),
+        description="RRF k constant for rrf/hybrid strategy"
     )
     document_id_field: str = Field(
         default="document_id",
         description="Payload field name that identifies the parent document",
     )
     top_chunks: str = Field(
-        default="3",
+        default_factory=lambda: str(_settings.default_rerank_top_chunks),
         description="Number of top chunks used internally for scoring",
     )
 

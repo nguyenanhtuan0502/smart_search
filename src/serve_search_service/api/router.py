@@ -54,11 +54,14 @@ async def _probe_idf(
 
 def _extract_vectors(
     result: EmbeddingResult,
-) -> tuple[list[float], dict[str, list] | None]:
+) -> tuple[list[float] | None, dict[str, list] | None]:
     """Pull the dense vector and (optional) sparse vector out of a single-query
-    embedding result, shaped the way HybridSearchService expects them."""
+    embedding result, shaped the way HybridSearchService expects them.
+    
+    Dense vector may be None if include_dense=False (identifier query).
+    """
     item = result.items[0]
-    dense = list(item.vector)
+    dense = list(item.vector) if item.vector is not None else None
     sparse: dict[str, list] | None = None
     if item.sparse is not None and item.sparse.indices:
         sparse = {
@@ -103,17 +106,30 @@ async def api_root(request: Request) -> dict[str, str]:
 
 def _build_qdrant_filter(
     filter_conditions: list[FilterCondition] | None,
+    must_not_conditions: list[FilterCondition] | None = None,
 ) -> dict[str, Any] | None:
-    """Convert FilterCondition list to Qdrant filter format.
+    """Convert FilterCondition lists to Qdrant filter format.
+
+    Args:
+        filter_conditions: Conditions to include (AND logic in must clause)
+        must_not_conditions: Conditions to exclude (must_not clause, user-provided only)
 
     Input:  [{"key": "group_ids", "value": ["hr", "aiit"]}, ...]
-    Output: {"must": [{"key": "group_ids", "match": {"any": ["hr", "aiit"]}}, ...]}
+    Output: {"must": [...], "must_not": [...]}
+    
+    Filter behavior:
+    - match_type='value': Exact Qdrant pre-filter via must_not clause
+    - match_type='text': Application-level post-filter using literal substring matching
+      after Qdrant search (see _filter_excluded_patterns)
+    
+    Text post-filter is intentional so patterns like "v/v" can be matched literally
+    without depending on Qdrant tokenizer configuration.
     
     None → no filter
     [] → no filter
     """
     if not filter_conditions:
-        return None
+        filter_conditions = []
 
     must_clauses: list[dict[str, Any]] = []
 
@@ -126,7 +142,101 @@ def _build_qdrant_filter(
         else:
             must_clauses.append({"key": key, "match": {"value": value}})
 
-    return {"must": must_clauses} if must_clauses else None
+    # Build must_not clauses from user-provided conditions
+    # In Qdrant: must_not = [A, B] means NOT A AND NOT B (exclude if any match)
+    must_not_clauses: list[dict[str, Any]] = []
+    
+    # Add user-provided must_not conditions (only if provided)
+    if must_not_conditions:
+        for condition in must_not_conditions:
+            key = condition.key
+            value = condition.value
+            match_type = getattr(condition, "match_type", "value")
+            
+            # match_type='text' is handled by application-level post-filtering
+            # after Qdrant search. Only send 'value' (exact) to Qdrant.
+            if match_type == "text":
+                continue
+            
+            if isinstance(value, list):
+                must_not_clauses.append({"key": key, "match": {"any": value}})
+            else:
+                must_not_clauses.append({"key": key, "match": {"value": value}})
+
+    # Return filter structure
+    filter_dict: dict[str, Any] = {}
+    if must_clauses:
+        filter_dict["must"] = must_clauses
+    if must_not_clauses:
+        filter_dict["must_not"] = must_not_clauses
+
+    return filter_dict if filter_dict else None
+
+
+def _filter_excluded_patterns(
+    chunk_results: list[dict[str, Any]],
+    must_not_conditions: list[FilterCondition] | None,
+) -> list[dict[str, Any]]:
+    """Post-filter chunks using literal substring matching for text patterns.
+
+    match_type='text' is handled at application level (not Qdrant pre-filter)
+    because Qdrant text matching is tokenizer-based, not raw substring/contains.
+    
+    This ensures patterns like "v/v" are matched literally in chunk text.
+    """
+    if not must_not_conditions or not chunk_results:
+        return chunk_results
+    
+    # Extract only text-type conditions
+    text_conditions = [
+        cond
+        for cond in must_not_conditions
+        if getattr(cond, "match_type", "value") == "text"
+    ]
+    
+    if not text_conditions:
+        return chunk_results
+    
+    filtered: list[dict[str, Any]] = []
+    
+    for chunk in chunk_results:
+        payload = chunk.get("payload") or {}
+        excluded = False
+        
+        for cond in text_conditions:
+            field_value = payload.get(cond.key)
+            
+            if field_value is None:
+                continue
+            
+            patterns = (
+                cond.value
+                if isinstance(cond.value, list)
+                else [cond.value]
+            )
+            
+            if isinstance(field_value, list):
+                text_content = " ".join(str(v) for v in field_value).casefold()
+            else:
+                text_content = str(field_value).casefold()
+            
+            if any(
+                str(pattern).casefold() in text_content
+                for pattern in patterns
+            ):
+                excluded = True
+                break
+        
+        if not excluded:
+            filtered.append(chunk)
+    
+    _logger.info(
+        "Post-filter text patterns: before=%d, after=%d",
+        len(chunk_results),
+        len(filtered),
+    )
+    
+    return filtered
 
 
 def _documents_matching_identifier(
@@ -280,7 +390,20 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
     _logger.info("Embedding completed in %.0fms", embed_ms)
 
     # ── Step 2: Build Qdrant filter ──────────────────────────
-    qdrant_filter = _build_qdrant_filter(payload.filter)
+    # Merge filters from 2 sources with AND logic:
+    # 1. Top-level filter (user/external)
+    # 2. Nested filter_conditions in search_options (if provided)
+    filter_conditions: list[FilterCondition] = []
+    
+    # 1. Add top-level filter
+    if payload.filter:
+        filter_conditions.extend(payload.filter)
+    
+    # 2. Add nested filter_conditions from search_options (only if provided by user)
+    if opts.filter_conditions:
+        filter_conditions.extend(opts.filter_conditions)
+    
+    qdrant_filter = _build_qdrant_filter(filter_conditions, opts.must_not_conditions) if filter_conditions else _build_qdrant_filter([], opts.must_not_conditions)
 
     # ── Step 2.5: Dynamic routing for document-code / số-hiệu queries ──
     # If auto_route is on and the query is an identifier lookup, force sparse-only
@@ -292,11 +415,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
             detection.kind, identifier,
         )
 
-    # ── Step 3: Hybrid search (dense + sparse → RRF fusion) ──
-    # `limit` is the number of DOCUMENTS the client wants back (cut in Step 5).
-    # For fusion we keep a wider chunk pool (fuse_limit) so rerank and the
-    # identifier bonus can see chunks beyond the first `limit`; the search
-    # service caps this to the actual candidate pool.
+
     fuse_limit = int(payload.limit) * int(opts.candidate_multiplier)
     search_start = time.perf_counter()
     result = await search_service.hybrid_search(
@@ -309,6 +428,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
         keyword_weight=keyword_weight,
         rrf_k=int(opts.rrf_k),
         candidate_multiplier=int(opts.candidate_multiplier),
+        fusion_mode=opts.fusion_mode,
         with_payload=True,  # Always need payload internally for document grouping
         fuse_limit=fuse_limit,
     )
@@ -337,8 +457,27 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
         result.get("fused_count", 0),
     )
 
+    # Log chunk score range for debugging
+    chunk_results = result.get("items", [])
+    if chunk_results:
+        scores = [item.get("score", 0) for item in chunk_results if isinstance(item.get("score"), (int, float))]
+        if scores:
+            max_score = max(scores)
+            min_score = min(scores)
+            _logger.info(
+                "Chunk scores: max=%.4f, min=%.4f, count=%d",
+                max_score, min_score, len(scores)
+            )
+
     # ── Step 4: Build document-level results ─────────────────
     chunk_results = result.get("result", [])
+    
+    # Apply literal substring exclusions after Qdrant search.
+    chunk_results = _filter_excluded_patterns(
+        chunk_results,
+        opts.must_not_conditions,
+    )
+    
     doc_id_field = payload.rerank.document_id_field if payload.rerank else "document_id"
 
     # Documents whose identifier exactly matches the query (empty when not a
@@ -380,9 +519,9 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
             ) from e
 
         # Apply identifier bonus to the final (post-rerank) document score, then
-        # re-sort. Rerank scores are in [0,1]; bonus >= 1.0 guarantees an
-        # exact-identifier document ranks first, while ties among matched docs
-        # keep their relative rerank order.
+        # re-sort. Rerank scores are in [0,1]; bonus > 1.0 guarantees an
+        # exact-identifier document ranks first. If bonus = 1.0, matched docs
+        # may tie with highest-scored non-matched docs (tied docs keep relative order).
         if matched_docs:
             for doc in reranked:
                 if doc["document_id"] in matched_docs:
