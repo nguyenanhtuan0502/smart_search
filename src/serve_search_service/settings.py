@@ -59,7 +59,13 @@ class ServiceSettings(BaseSettings):
     # Dynamic routing for document-code / số-hiệu queries (router_regex feature).
     default_auto_route: bool = True
     default_identifier_bonus: float = 0.5
-    default_score_threshold: float | None = None
+    default_score_threshold: float =0.2
+    
+    # Rerank defaults (overridable per-request via rerank option).
+    default_rerank_strategy: str = "hybrid"
+    default_rerank_mean_m: int = 3
+    default_rerank_rrf_k: int = 60
+    default_rerank_top_chunks: int = 3
 
     default_citation: bool = True
     citation_idf_tau: float = 2.5
