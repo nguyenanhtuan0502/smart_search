@@ -491,16 +491,16 @@ class HybridSearchRequest(BaseModel):
     @model_validator(mode="after")
     def validate_candidate_pool(self) -> "HybridSearchRequest":
         # The candidate pool actually retrieved is
-        #   min(limit * candidate_multiplier, MAX_CANDIDATE_LIMIT).
+        #   min(limit * candidate_multiplier, max_candidate_limit).
         # Reject (instead of silently capping) when the requested pool exceeds
         # the hard cap, so the caller is not misled about how many candidates
         # are used. Both fields validate individually first, so int() is safe.
         opts = self.search_options or SearchOptions()
         pool = int(self.limit) * int(opts.candidate_multiplier)
-        if pool > MAX_CANDIDATE_LIMIT:
+        if pool > _settings.max_candidate_limit:
             raise ValueError(
                 f"limit * candidate_multiplier = {pool} exceeds the candidate pool "
-                f"cap of {MAX_CANDIDATE_LIMIT}; reduce limit or candidate_multiplier."
+                f"cap of {_settings.max_candidate_limit}; reduce limit or candidate_multiplier."
             )
         return self
 

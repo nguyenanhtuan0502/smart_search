@@ -146,7 +146,7 @@ class HybridSearchService:
         fusion_mode: str = "client",
         with_payload: bool = True,
         fuse_limit: int | None = None,
-        max_candidate_limit: int = 100,
+        max_candidate_limit: int = 500,
     ) -> dict[str, Any]:
         """Execute search based on available vectors and return fused results.
 
