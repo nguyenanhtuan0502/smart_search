@@ -56,6 +56,7 @@ class ServiceSettings(BaseSettings):
     default_rrf_k: int = 5
     default_candidate_multiplier: int = 5
     default_fusion_mode: str = "client"
+    max_candidate_limit: int = 500  # Hard limit on candidate retrieval
     # Dynamic routing for document-code / số-hiệu queries (router_regex feature).
     default_auto_route: bool = True
     default_identifier_bonus: float = 0.5

@@ -8,9 +8,6 @@ from ..logging import TraceIdAdapter, get_logger
 
 _logger: TraceIdAdapter = get_logger(__name__)
 
-# Hard limit on candidate retrieval to avoid overloading Qdrant.
-MAX_CANDIDATE_LIMIT = 100
-
 # Fusion strategies accepted by hybrid_search. The public DTO enforces this
 # via Literal[...], but the service validates too so direct (non-HTTP) callers
 # get a clear error instead of silently falling through to client-mode.
@@ -149,6 +146,7 @@ class HybridSearchService:
         fusion_mode: str = "client",
         with_payload: bool = True,
         fuse_limit: int | None = None,
+        max_candidate_limit: int = 100,
     ) -> dict[str, Any]:
         """Execute search based on available vectors and return fused results.
 
@@ -175,11 +173,11 @@ class HybridSearchService:
                 "detail": "limit must be greater than 0.",
             }
 
-        if limit > MAX_CANDIDATE_LIMIT:
+        if limit > max_candidate_limit:
             return {
                 "error": True,
                 "status": 422,
-                "detail": f"limit must not exceed {MAX_CANDIDATE_LIMIT}.",
+                "detail": f"limit must not exceed {max_candidate_limit}.",
             }
 
         # Service-level sanity bound only. The public DTO (SearchOptions)
@@ -225,7 +223,7 @@ class HybridSearchService:
 
         candidate_limit = min(
             max(limit, limit * candidate_multiplier),
-            MAX_CANDIDATE_LIMIT,
+            max_candidate_limit,
         )
 
         # How many results to keep after fusion. Defaults to `limit` (legacy);
