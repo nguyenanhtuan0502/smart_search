@@ -11,7 +11,6 @@ from pydantic import (
     model_validator,
 )
 
-from ..application.search import MAX_CANDIDATE_LIMIT
 from ..settings import ServiceSettings
 
 # Load once at import so field defaults come from env (SERVE_SEARCH_*), while
