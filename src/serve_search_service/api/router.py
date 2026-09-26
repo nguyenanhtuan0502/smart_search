@@ -431,6 +431,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
         fusion_mode=opts.fusion_mode,
         with_payload=True,  # Always need payload internally for document grouping
         fuse_limit=fuse_limit,
+        max_candidate_limit=request.app.state.settings.max_candidate_limit,
     )
     search_ms = (time.perf_counter() - search_start) * 1000
 
