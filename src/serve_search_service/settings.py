@@ -77,6 +77,7 @@ class ServiceSettings(BaseSettings):
     citation_semantic_gate: float = 0.5
     citation_max_phrase_tokens: int = 6
     citation_nested_ratio: float = 0.9
+    citation_secondary_tau: float = 1.0
 
     @field_validator("qdrant_url")
     @classmethod

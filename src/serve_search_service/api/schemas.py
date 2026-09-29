@@ -349,6 +349,7 @@ _CITATION_BOUNDS: dict[str, tuple[float, float, bool]] = {
     "semantic_gate": (0.0, 1.0, False),
     "max_phrase_tokens": (1, 10, True),
     "nested_ratio": (0.5, 1.0, False),
+    "secondary_tau": (0.0, 20.0, False),
 }
 
 
@@ -395,6 +396,13 @@ class CitationOptions(BaseModel):
         description=(
             "A phrase yields to a one-syllable-longer phrase found in this share "
             "of its chunks (0.5 to 1.0)"
+        ),
+    )
+    secondary_tau: str = Field(
+        default_factory=lambda: str(_settings.citation_secondary_tau),
+        description=(
+            "Minimum IDF for other multi-syllable query words to be highlighted inside "
+            "the chosen snippet; a value >= idf_tau turns this off (0 to 20)"
         ),
     )
 

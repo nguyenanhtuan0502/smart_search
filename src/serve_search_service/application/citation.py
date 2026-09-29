@@ -54,6 +54,7 @@ def _gram_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
 
 MAX_PHRASE_TOKENS = 6
 NESTED_RATIO = 0.9
+SECONDARY_TAU = 1.0
 
 STOPWORDS = frozenset(
     """
@@ -96,6 +97,7 @@ class Keyword:
     tokens: tuple[str, ...]
     idf: float
     pattern: re.Pattern[str] = field(compare=False)
+    span: tuple[int, int] = field(default=(0, 0), compare=False)
 
 
 def select_keywords(
@@ -108,14 +110,18 @@ def select_keywords(
     min_cohesion: float,
     max_phrase_tokens: int = MAX_PHRASE_TOKENS,
     nested_ratio: float = NESTED_RATIO,
+    df_cache: dict[tuple[str, ...], int] | None = None,
 ) -> list[Keyword]:
+    """``df_cache`` maps a gram to its pool DF. It depends only on the pool, not on
+    tau, so callers selecting twice over the same pool can share it."""
     tokens = _tokenize(query)
     if not tokens:
         return []
 
     blocked = _stop_positions(tokens)
     lowered = [t.lower() for t in pool_plaintexts]
-    df_cache: dict[tuple[str, ...], int] = {}
+    if df_cache is None:
+        df_cache = {}
 
     def pool_df(gram: tuple[str, ...]) -> int:
         if gram not in df_cache:
@@ -243,9 +249,53 @@ def select_keywords(
         gram = tuple(tokens[start:stop])
         score = max(idf_by_token.get(t, 0.0) for t in gram)
         chosen.append(
-            Keyword(text=" ".join(gram), tokens=gram, idf=score, pattern=_gram_pattern(gram))
+            Keyword(
+                text=" ".join(gram),
+                tokens=gram,
+                idf=score,
+                pattern=_gram_pattern(gram),
+                span=(start, stop),
+            )
         )
     return chosen
+
+
+def secondary_keywords(
+    query: str,
+    pool_plaintexts: list[str],
+    idf_by_token: dict[str, float],
+    primary: list[Keyword],
+    config: "CitationConfig",
+    df_cache: dict[tuple[str, ...], int] | None = None,
+) -> list[Keyword]:
+    if config.secondary_tau >= config.tau:
+        return []
+    lower = select_keywords(
+        query,
+        pool_plaintexts,
+        idf_by_token,
+        tau=config.secondary_tau,
+        top_m=config.top_m,
+        min_cohesion=config.min_cohesion,
+        max_phrase_tokens=config.max_phrase_tokens,
+        nested_ratio=config.nested_ratio,
+        df_cache=df_cache,
+    )
+    grams = {keyword.tokens for keyword in primary}
+
+    def redundant(keyword: Keyword) -> bool:
+        if keyword.tokens in grams:
+            return True
+        start, stop = keyword.span
+        for p_start, p_stop in (p.span for p in primary):
+            if stop <= p_start or p_stop <= start:
+                continue
+            if start <= p_start and p_stop <= stop and (start, stop) != (p_start, p_stop):
+                continue
+            return True
+        return False
+
+    return [k for k in lower if len(k.tokens) > 1 and not redundant(k)]
 
 
 def _merge_spans(text: str, spans: list[tuple[int, int, float]]) -> list[tuple[int, int, float]]:
@@ -345,6 +395,7 @@ class CitationConfig:
     semantic_gate: float = 0.5
     max_phrase_tokens: int = MAX_PHRASE_TOKENS
     nested_ratio: float = NESTED_RATIO
+    secondary_tau: float = SECONDARY_TAU
 
 
 TIER_LITERAL = "literal"
@@ -435,6 +486,13 @@ def _pick(chunks: list[_Chunk], config: CitationConfig) -> list[_Chunk]:
     return [anchor] + tail
 
 
+def _add_secondary(
+    text: str, highlights: list[tuple[int, int]], extras: list[Keyword]
+) -> list[tuple[int, int]]:
+    spans = [(s, e, 1.0) for s, e in highlights] + find_spans(text, extras)
+    return [(s, e) for s, e, _ in _merge_spans(text, spans)]
+
+
 def _describe(chunk: _Chunk) -> str:
     dense = "-" if chunk.dense_score is None else f"{chunk.dense_score:.3f}"
     return (
@@ -464,6 +522,7 @@ def build_citations(
     by_document, pool_texts = _collect(chunk_results, document_id_field)
     by_document = {k: v for k, v in by_document.items() if k in wanted}
 
+    df_cache: dict[tuple[str, ...], int] = {}
     keywords = select_keywords(
         query,
         pool_texts,
@@ -473,10 +532,13 @@ def build_citations(
         min_cohesion=config.min_cohesion,
         max_phrase_tokens=config.max_phrase_tokens,
         nested_ratio=config.nested_ratio,
+        df_cache=df_cache,
     )
+    extras = secondary_keywords(query, pool_texts, idf_by_token, keywords, config, df_cache)
     _logger.info(
-        "Citation keywords: %s",
+        "Citation keywords: %s | secondary: %s",
         ", ".join(f"{k.text}({k.idf:.2f})" for k in keywords) or "(none above tau)",
+        ", ".join(f"{k.text}({k.idf:.2f})" for k in extras) or "-",
     )
 
     out: dict[str, dict[str, Any]] = {}
@@ -504,6 +566,8 @@ def build_citations(
             text, highlights, truncated = make_window(
                 chunk.plaintext, chunk.spans, config.window_chars
             )
+            if extras and tier == TIER_LITERAL:
+                highlights = _add_secondary(text, highlights, extras)
             citations.append(
                 {
                     "chunk_id": chunk.point_id,
