@@ -36,9 +36,9 @@ class ServiceSettings(BaseSettings):
 
     # Dense embedding backend.
     embedding_url: str = "http://10.6.14.127:9003"
-    embedding_model: str = "Qwen/Qwen3-Embedding-8B"
+    embedding_model: str = "Qwen/Qwen3-Embedding-4B"
     embedding_api_key: str | None = None
-    embedding_dimensions: int = 4096
+    embedding_dimensions: int = 2560
     embedding_timeout_seconds: float = 60.0
     embedding_max_retries: int = 2
     embedding_retry_backoff_seconds: float = 1.5
@@ -60,7 +60,23 @@ class ServiceSettings(BaseSettings):
     # Dynamic routing for document-code / số-hiệu queries (router_regex feature).
     default_auto_route: bool = True
     default_identifier_bonus: float = 0.5
-    default_score_threshold: float =0.2
+    # Extra bonus added (on top of identifier_bonus) when the query carries a
+    # version (e.g. "v4.0") AND the document's docVersion matches it. Prioritizes
+    # the exact-version document within the same docMaVanBan family without
+    # turning the version into part of the identifier.
+    default_version_bonus: float = 0.4
+    default_score_threshold: float = 0.2
+    # Regex patterns for identifier shape detection (re.IGNORECASE applied automatically).
+    # Override via env to extend/narrow what counts as a doc-code or sohieu.
+    # Default values mirror the hardcoded patterns in router_regex.py.
+    # SERVE_SEARCH_DEFAULT_CODE_SHAPE_PATTERN
+    default_code_shape_pattern: str = (
+        r"^[a-z]{1,4}\d{0,3}[a-z]?(?:/[a-z]{1,4}\d{0,3}[a-z]?){1,5}$"
+    )
+    # SERVE_SEARCH_DEFAULT_SOHIEU_SHAPE_PATTERN
+    default_sohieu_shape_pattern: str = (
+        r"^\d{1,5}/\d{4}(?:/[a-z0-9]{1,12}){0,6}$"
+    )
     
     # Rerank defaults (overridable per-request via rerank option).
     default_rerank_strategy: str = "hybrid"
