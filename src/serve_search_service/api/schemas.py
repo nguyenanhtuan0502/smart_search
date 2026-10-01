@@ -1,5 +1,6 @@
 """Client-facing DTOs for search API."""
 
+import re
 from typing import Any, Literal
 
 from pydantic import (
@@ -86,11 +87,36 @@ class SearchOptions(BaseModel):
         default_factory=lambda: str(_settings.default_auto_route).lower(),
         description="Dynamic routing for document-code queries ('true'/'false')",
     )
+    code_shape_pattern: str = Field(
+        default_factory=lambda: _settings.default_code_shape_pattern,
+        description=(
+            "Regex pattern for doc-code shape detection (re.IGNORECASE). "
+            "Overrides env SERVE_SEARCH_DEFAULT_CODE_SHAPE_PATTERN and settings default. "
+            "Default: r'^[a-z]{1,4}\\d{0,3}[a-z]?(?:/[a-z]{1,4}\\d{0,3}[a-z]?){1,5}$'"
+        ),
+    )
+    sohieu_shape_pattern: str = Field(
+        default_factory=lambda: _settings.default_sohieu_shape_pattern,
+        description=(
+            "Regex pattern for sohieu shape detection (re.IGNORECASE). "
+            "Overrides env SERVE_SEARCH_DEFAULT_SOHIEU_SHAPE_PATTERN and settings default. "
+            "Default: r'^\\d{1,5}/\\d{4}(?:/[a-z0-9]{1,12}){0,6}$'"
+        ),
+    )
     identifier_bonus: str = Field(
         default_factory=lambda: str(_settings.default_identifier_bonus),
         description=(
             "Score added to a document (after rerank) when its docMaVanBan/docSoHieu "
             "exactly matches the detected query identifier ."
+        ),
+    )
+    version_bonus: str = Field(
+        default_factory=lambda: str(_settings.default_version_bonus),
+        description=(
+            "Extra score added (on top of identifier_bonus, after rerank) when the "
+            "query carries a version (e.g. 'v4.0') AND the document's docVersion "
+            "matches it. Prioritizes the exact-version document within the same "
+            "docMaVanBan family. Only applied to identifier queries that have a version."
         ),
     )
     citation: str = Field(
@@ -186,6 +212,15 @@ class SearchOptions(BaseModel):
             )
         return v
 
+    @field_validator("code_shape_pattern", "sohieu_shape_pattern")
+    @classmethod
+    def validate_regex_pattern(cls, v: str) -> str:
+        try:
+            re.compile(v)
+        except re.error as exc:
+            raise ValueError(f"Invalid regex pattern {v!r}: {exc}") from exc
+        return v
+
     def auto_route_enabled(self) -> bool:
         """Parse auto_route string to bool for internal use."""
         return self.auto_route.strip().lower() in {"true", "1", "yes"}
@@ -213,6 +248,19 @@ class SearchOptions(BaseModel):
             ) from err
         if not (0.0 <= value <= 5.0):
             raise ValueError(f"identifier_bonus must be between 0.0 and 5.0, got {value}")
+        return v
+
+    @field_validator("version_bonus")
+    @classmethod
+    def validate_version_bonus_string(cls, v: str) -> str:
+        try:
+            value = float(v)
+        except ValueError as err:
+            raise ValueError(
+                f"version_bonus must be a valid number string, got '{v}'"
+            ) from err
+        if not (0.0 <= value <= 5.0):
+            raise ValueError(f"version_bonus must be between 0.0 and 5.0, got {value}")
         return v
 
     @model_validator(mode="after")
