@@ -598,6 +598,7 @@ async def api_hybrid_search(payload: HybridSearchRequest, request: Request) -> d
                 semantic_gate=float(cite.semantic_gate),
                 max_phrase_tokens=int(cite.max_phrase_tokens),
                 nested_ratio=float(cite.nested_ratio),
+                secondary_tau=float(cite.secondary_tau),
             )
             citations = build_citations(
                 document_results,
