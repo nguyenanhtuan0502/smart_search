@@ -886,6 +886,33 @@ async def api_hybrid_search(
 
     embed_start = time.perf_counter()
 
+    # Qwen3 instruction for the dense query side. Documents are embedded raw at
+    # ingest, so applying the instruction only to the query matches how the
+    # model was trained. Skipped for identifier queries (sparse-only).
+    query_instruction = (
+        (opts.query_instruction or "").strip() or None
+        if not is_identifier_query
+        else None
+    )
+
+    _debug_file_logger.info(
+        "========== DENSE QUERY EMBEDDING =========="
+    )
+    _debug_file_logger.info(
+        "embedding_query=%r",
+        embedding_query,
+    )
+    _debug_file_logger.info(
+        "query_instruction=%r",
+        query_instruction,
+    )
+    _debug_file_logger.info(
+        "formatted_query=%r",
+        f"Instruct: {query_instruction}\nQuery:{embedding_query}"
+        if query_instruction
+        else embedding_query,
+    )
+
     try:
         embed_result = (
             await embedding_service.create_embeddings(
@@ -895,13 +922,15 @@ async def api_hybrid_search(
                 model=payload.embedding_model,
                 base_url=payload.embedding_url,
                 api_key=payload.embedding_api_key,
+                instruction=query_instruction,
             )
         )
 
     except EmbedderUnavailableError as e:
         _logger.error(
-            "Embedding failed for query='%s': %s",
+            "Embedding failed for query='%s' (instruction='%s'): %s",
             payload.query[:50],
+            (query_instruction or "")[:50],
             e,
         )
 
@@ -1228,7 +1257,7 @@ async def api_hybrid_search(
 
     version_bonus = (
         float(opts.version_bonus)
-        if auto_route and hybrid_rerank_enabled
+        if auto_route and hybrid_rerank_enabled and opts.version_match_enabled()
         else 0.0
     )
 
