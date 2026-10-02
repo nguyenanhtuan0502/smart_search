@@ -976,6 +976,22 @@ async def api_hybrid_search(
             opts.filter_conditions
         )
 
+    # category_parent_id → pre-filter on payload field 'categoryParentId'.
+    # Exact-value match; docs missing the field are excluded by Qdrant.
+    category_parent_id = (payload.category_parent_id or "").strip()
+    if category_parent_id:
+        filter_conditions.append(
+            FilterCondition(
+                key="categoryParentId",
+                value=category_parent_id,
+                match_type="value",
+            )
+        )
+        _debug_file_logger.info(
+            "category_parent_id pre-filter: categoryParentId=%r",
+            category_parent_id,
+        )
+
     qdrant_filter = (
         _build_qdrant_filter(
             filter_conditions,

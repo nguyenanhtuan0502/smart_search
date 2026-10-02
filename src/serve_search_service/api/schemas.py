@@ -27,7 +27,7 @@ _settings = ServiceSettings()
 class FilterCondition(BaseModel):
 
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     key: str = Field(min_length=1, description="Payload field name to filter on")
     value: str | list[str] = Field(
@@ -47,7 +47,7 @@ class FilterCondition(BaseModel):
 class UdfField(BaseModel):
     """A user-defined field in the MAS payload format."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     key: str = Field(min_length=1, description="User-defined field name")
     value: Any = Field(description="User-defined field value")
@@ -61,7 +61,7 @@ class UdfField(BaseModel):
 class SearchOptions(BaseModel):
     """Search tuning parameters."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     vector_weight: str = Field(
         default_factory=lambda: str(_settings.default_vector_weight),
@@ -313,7 +313,7 @@ class SearchOptions(BaseModel):
 class RerankOptions(BaseModel):
     """Document-level reranking configuration."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     strategy: Literal["maxp", "top_m_mean", "hit_count", "rrf", "hybrid"] = Field(
         default_factory=lambda: _settings.default_rerank_strategy,  # type: ignore[arg-type]
@@ -432,7 +432,7 @@ _CITATION_BOUNDS: dict[str, tuple[float, float, bool]] = {
 
 
 class CitationOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     idf_tau: str = Field(
         default_factory=lambda: str(_settings.citation_idf_tau),
@@ -505,7 +505,7 @@ class CitationOptions(BaseModel):
 
 class HybridSearchRequest(BaseModel):
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     query: str = Field(min_length=1, description="Query text (question / search keywords)")
     collection: str = Field(
@@ -529,6 +529,17 @@ class HybridSearchRequest(BaseModel):
         default=None,
         min_length=1,
         description="Override the API key sent to the embedding gateway (default: from env)",
+    )
+
+    category_parent_id: str | None = Field(
+        default=None,
+        alias="categoryParentId",
+        description=(
+            "Pre-filter: only return documents whose payload 'categoryParentId' "
+            "matches this value exactly. Mapped to a Qdrant must-filter on the "
+            "'categoryParentId' field. Documents missing the field are naturally "
+            "excluded by Qdrant. Omit/null to disable."
+        ),
     )
 
     search_options: SearchOptions | None = Field(

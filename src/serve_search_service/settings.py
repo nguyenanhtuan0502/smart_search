@@ -51,8 +51,7 @@ class ServiceSettings(BaseSettings):
     # non-English corpora (training instructions were mostly English), and
     # tailored to the task/domain. Overridable via env + per-request.
     default_query_instruction: str = (
-        "Given a search query in Vietnamese, retrieve relevant TPBank internal "
-        "regulation, process, product and form documents that match the query"
+        "Given a web search query, retrieve relevant passages that answer the query"
     )
 
     # Sparse embedding (BM25, computed in-process)
