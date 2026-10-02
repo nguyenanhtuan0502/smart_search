@@ -38,5 +38,11 @@ class EmbeddingResult:
 
 
 def format_query(instruction: str, query: str) -> str:
-    """Qwen3 instruction template, applied on the query side only."""
-    return f"Instruct: {instruction}\nQuery: {query}"
+    """Qwen3-Embedding query template, applied on the query side only.
+
+    Matches the official prompt in Qwen3-Embedding's
+    config_sentence_transformers.json exactly: the query is appended directly
+    after 'Query:' with NO trailing space. Documents are embedded raw (the
+    model card defines the document prompt as an empty string).
+    """
+    return f"Instruct: {instruction}\nQuery:{query}"

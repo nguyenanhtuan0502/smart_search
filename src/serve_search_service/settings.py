@@ -42,6 +42,18 @@ class ServiceSettings(BaseSettings):
     embedding_timeout_seconds: float = 60.0
     embedding_max_retries: int = 2
     embedding_retry_backoff_seconds: float = 1.5
+    # Qwen3-Embedding applies an instruction on the QUERY side only (documents
+    # are embedded raw at ingest time). Without it, query vectors are off and
+    # dense retrieval degrades badly for natural-language queries. Empty string
+    # disables it (query embedded raw). Overridable via env
+    # SERVE_SEARCH_DEFAULT_QUERY_INSTRUCTION and per-request.
+    # Per Qwen3 guidance, instructions are written in English even for
+    # non-English corpora (training instructions were mostly English), and
+    # tailored to the task/domain. Overridable via env + per-request.
+    default_query_instruction: str = (
+        "Given a search query in Vietnamese, retrieve relevant TPBank internal "
+        "regulation, process, product and form documents that match the query"
+    )
 
     # Sparse embedding (BM25, computed in-process)
     sparse_embedding_model: str = "bm25"
@@ -65,6 +77,9 @@ class ServiceSettings(BaseSettings):
     # the exact-version document within the same docMaVanBan family without
     # turning the version into part of the identifier.
     default_version_bonus: float = 0.4
+    # Master switch for the version-matching flow. When false, the query version
+    # (e.g. "v4.0") is still extracted but no version bonus is applied.
+    default_version_match: bool = True
     default_score_threshold: float = 0.2
     # Regex patterns for identifier shape detection (re.IGNORECASE applied automatically).
     # Override via env to extend/narrow what counts as a doc-code or sohieu.

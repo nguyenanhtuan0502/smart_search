@@ -83,6 +83,15 @@ class SearchOptions(BaseModel):
         default_factory=lambda: _settings.default_fusion_mode,  # type: ignore[arg-type]
         description="Fusion strategy for hybrid search",
     )
+    query_instruction: str = Field(
+        default_factory=lambda: _settings.default_query_instruction,
+        description=(
+            "Qwen3-Embedding instruction applied to the dense QUERY side only "
+            "(documents are embedded raw at ingest). Formatted as "
+            "'Instruct: {instruction}\\nQuery: {query}'. Empty string disables it "
+            "(query embedded raw). Ignored for identifier/sparse-only queries."
+        ),
+    )
     auto_route: str = Field(
         default_factory=lambda: str(_settings.default_auto_route).lower(),
         description="Dynamic routing for document-code queries ('true'/'false')",
@@ -110,13 +119,22 @@ class SearchOptions(BaseModel):
             "exactly matches the detected query identifier ."
         ),
     )
+    version_match: str = Field(
+        default_factory=lambda: str(_settings.default_version_match).lower(),
+        description=(
+            "Master switch for the version-matching flow ('true'/'false'). When "
+            "'false', the query version is still extracted but no version bonus is "
+            "applied (version has no effect on ranking)."
+        ),
+    )
     version_bonus: str = Field(
         default_factory=lambda: str(_settings.default_version_bonus),
         description=(
             "Extra score added (on top of identifier_bonus, after rerank) when the "
             "query carries a version (e.g. 'v4.0') AND the document's docVersion "
             "matches it. Prioritizes the exact-version document within the same "
-            "docMaVanBan family. Only applied to identifier queries that have a version."
+            "docMaVanBan family. Only applied to identifier queries that have a version. "
+            "Ignored when version_match is 'false'."
         ),
     )
     citation: str = Field(
@@ -224,6 +242,19 @@ class SearchOptions(BaseModel):
     def auto_route_enabled(self) -> bool:
         """Parse auto_route string to bool for internal use."""
         return self.auto_route.strip().lower() in {"true", "1", "yes"}
+
+    @field_validator("version_match")
+    @classmethod
+    def validate_version_match_string(cls, v: str) -> str:
+        if v.strip().lower() not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                f"version_match must be a boolean string (true/false), got '{v}'"
+            )
+        return v
+
+    def version_match_enabled(self) -> bool:
+        """Parse version_match string to bool for internal use."""
+        return self.version_match.strip().lower() in {"true", "1", "yes"}
 
     @field_validator("citation")
     @classmethod
