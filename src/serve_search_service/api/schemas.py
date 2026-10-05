@@ -137,6 +137,32 @@ class SearchOptions(BaseModel):
             "Ignored when version_match is 'false'."
         ),
     )
+    title_search: str = Field(
+        default_factory=lambda: str(_settings.default_title_search).lower(),
+        description=(
+            "Also search title chunks (chunk 0) and return documents whose title "
+            "matches the query in a separate 'title_result' field ('true'/'false'). "
+            "'result' is unaffected. Empty for document-code queries."
+        ),
+    )
+    title_top_k: str = Field(
+        default_factory=lambda: str(_settings.default_title_top_k),
+        description=(
+            "Title chunks retrieved per branch (dense/sparse) for title_result "
+            "(1 to 100)"
+        ),
+    )
+    title_rrf_k: str = Field(
+        default_factory=lambda: str(_settings.default_title_rrf_k),
+        description="RRF constant k for ranking title chunks (1 to 200)",
+    )
+    title_min_coverage: str = Field(
+        default_factory=lambda: str(_settings.default_title_min_coverage),
+        description=(
+            "Minimum IDF-weighted share of query tokens a title must contain to "
+            "appear in title_result (0.0 to 1.0)"
+        ),
+    )
     citation: str = Field(
         default_factory=lambda: str(_settings.default_citation).lower(),
         description=(
@@ -292,6 +318,46 @@ class SearchOptions(BaseModel):
             ) from err
         if not (0.0 <= value <= 5.0):
             raise ValueError(f"version_bonus must be between 0.0 and 5.0, got {value}")
+        return v
+
+    @field_validator("title_search")
+    @classmethod
+    def validate_title_search_string(cls, v: str) -> str:
+        if v.strip().lower() not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                f"title_search must be a boolean string (true/false), got '{v}'"
+            )
+        return v
+
+    def title_search_enabled(self) -> bool:
+        """Parse title_search string to bool for internal use."""
+        return self.title_search.strip().lower() in {"true", "1", "yes"}
+
+    @field_validator("title_min_coverage")
+    @classmethod
+    def validate_title_min_coverage_string(cls, v: str) -> str:
+        try:
+            value = float(v)
+        except ValueError as err:
+            raise ValueError(
+                f"title_min_coverage must be a valid number string, got '{v}'"
+            ) from err
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"title_min_coverage must be between 0.0 and 1.0, got {value}")
+        return v
+
+    @field_validator("title_top_k", "title_rrf_k")
+    @classmethod
+    def validate_title_int_string(cls, v: str, info: ValidationInfo) -> str:
+        high = 100 if info.field_name == "title_top_k" else 200
+        try:
+            value = int(v)
+        except ValueError as err:
+            raise ValueError(
+                f"{info.field_name} must be a valid integer string, got '{v}'"
+            ) from err
+        if not (1 <= value <= high):
+            raise ValueError(f"{info.field_name} must be between 1 and {high}, got {value}")
         return v
 
     @model_validator(mode="after")
@@ -638,13 +704,42 @@ class DocumentResultItem(BaseModel):
         description=(
             "How the snippets were chosen: 'literal' (keyword matches), 'semantic' "
             "(strong dense match, no keywords), 'whole' (chunk shown as-is), or "
-            "'title_only' (no citable chunk). None when citation is off."
+            "'title_only' (no citable chunk; the citation is the full document title). "
+            "None when citation is off."
         ),
     )
     citations: list[CitationItem] = Field(default_factory=list)
+
+
+class TitleResultItem(BaseModel):
+    """A document whose title (chunk 0) matches the query."""
+
+    document_id: str
+    rank_document: int = Field(description="Rank within title_result (1-based)")
+    title_score: float = Field(
+        description="Title rank strength (RRF of dense + sparse, best = 1) × coverage"
+    )
+    title: str | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Document title (docTenVB); only when citation is on",
+    )
+    title_highlights: list[CitationHighlight] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description="Spans of title matching the query; only when citation is on",
+    )
 
 
 class HybridSearchResponse(BaseModel):
 
     status: int = 200
     result: list[DocumentResultItem] = Field(default_factory=list)
+    title_result: list[TitleResultItem] | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Title branch documents, present only when search_options.title_search "
+            "is 'true'"
+        ),
+    )

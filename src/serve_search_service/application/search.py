@@ -487,3 +487,43 @@ class HybridSearchService:
             "fused_count": len(fused),
             "mode": "hybrid",
         }
+
+    async def title_search(
+        self,
+        collection: str,
+        dense_vector: list[float],
+        sparse_vector: dict[str, Any],
+        *,
+        top_k: int,
+        payload_filter: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        try:
+            batch = await self._qdrant.query_batch(
+                collection=collection,
+                dense_vector=dense_vector,
+                sparse_vector=sparse_vector,
+                limit=top_k,
+                payload_filter=title_chunk_filter(payload_filter),
+            )
+        except Exception:
+            _logger.exception("Title search raised, title_result will be empty.")
+            return [], []
+        if batch.get("error"):
+            _logger.warning(
+                "Title search failed, title_result will be empty: %s", batch.get("detail")
+            )
+            return [], []
+        return batch.get("dense", []), batch.get("sparse", [])
+
+
+TITLE_CHUNK_INDEX = 0
+
+
+def title_chunk_filter(payload_filter: dict[str, Any] | None) -> dict[str, Any]:
+    """Add ``chunk_index == 0`` to ``payload_filter`` without mutating it."""
+    merged = dict(payload_filter or {})
+    merged["must"] = [
+        *merged.get("must", []),
+        {"key": "chunk_index", "match": {"value": TITLE_CHUNK_INDEX}},
+    ]
+    return merged

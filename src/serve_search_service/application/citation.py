@@ -1,10 +1,12 @@
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..adapters.embedding_engine import _hash_token, _tokenize
 from ..logging import TraceIdAdapter, get_logger
+from .title_branch import title_highlights, title_texts
 
 _logger: TraceIdAdapter = get_logger(__name__)
 
@@ -47,8 +49,23 @@ def is_citable(plaintext: str) -> bool:
     return len(_WORD.findall(plaintext)) > 0 and len(_tokenize(plaintext)) >= MIN_CITATION_WORDS
 
 
+def _is_abbreviation(token: str) -> bool:
+    """Three or more letters, no vowel: "tsbđ", "httd". Every Vietnamese
+    syllable has a vowel, so such a token is an acronym that stands on its own.
+    Two-letter ones ("td", "hđ") are left alone: they are document-code parts."""
+    folded = unicodedata.normalize("NFD", token.lower().replace("đ", "d"))
+    letters = [c for c in folded if c.isalpha()]
+    return len(letters) >= 3 and not any(c in "aeiouy" for c in letters)
+
+
+def _token_pattern(token: str) -> str:
+    escaped = re.escape(token)
+    # Acronyms are written both ways ("TSBĐ"/"TSBD"); words keep đ ≠ d.
+    return re.sub("[dđ]", "[dđ]", escaped) if _is_abbreviation(token) else escaped
+
+
 def _gram_pattern(tokens: tuple[str, ...]) -> re.Pattern[str]:
-    body = r"\W+".join(re.escape(t) for t in tokens)
+    body = r"\W+".join(_token_pattern(t) for t in tokens)
     return re.compile(rf"(?<!\w){body}(?!\w)", re.IGNORECASE | re.UNICODE)
 
 
@@ -228,6 +245,12 @@ def select_keywords(
             resolved.append(whole)
             covered.update(range(*whole))
             orphans.append(f"{tokens[pos]}->{' '.join(tokens[whole[0] : whole[1]])}")
+        elif _is_abbreviation(tokens[pos]):
+            # An acronym is a whole word; a neighbour it never appears with
+            # (e.g. across " - ") is no reason to drop it.
+            resolved.append(pick)
+            covered.add(pos)
+            orphans.append(f"{tokens[pos]}->kept")
         else:
             orphans.append(f"{tokens[pos]}->dropped")
 
@@ -493,6 +516,30 @@ def _add_secondary(
     return [(s, e) for s, e, _ in _merge_spans(text, spans)]
 
 
+def _title_citation(
+    chunk_results: list[dict[str, Any]], doc_id: str, document_id_field: str, query: str
+) -> dict[str, Any] | None:
+    """The document title as its citation, uncut, from the chunk 0 point if pooled."""
+    points = [
+        item for item in chunk_results
+        if str((item.get("payload") or {}).get(document_id_field)) == doc_id
+    ]
+    points.sort(key=lambda item: (item.get("payload") or {}).get("chunk_index") not in (0, "0"))
+    title = title_texts(points, document_id_field=document_id_field).get(doc_id)
+    if not title:
+        return None
+    highlights = title_highlights(title, query)
+    return {
+        "chunk_id": str(points[0].get("id", "")),
+        "chunk_index": 0,
+        "text": title,
+        "highlights": [{"start": s, "end": e} for s, e in highlights],
+        "match_count": len(highlights),
+        "truncated": False,
+        "is_anchor": True,
+    }
+
+
 def _describe(chunk: _Chunk) -> str:
     dense = "-" if chunk.dense_score is None else f"{chunk.dense_score:.3f}"
     return (
@@ -546,7 +593,8 @@ def build_citations(
     for doc_id in wanted:
         chunks = by_document.get(doc_id) or []
         if not chunks:
-            out[doc_id] = {"tier": TIER_TITLE_ONLY, "citations": []}
+            title = _title_citation(chunk_results, doc_id, document_id_field, query)
+            out[doc_id] = {"tier": TIER_TITLE_ONLY, "citations": [title] if title else []}
             trace[doc_id] = f"{doc_id}:{TIER_TITLE_ONLY}"
             continue
 
