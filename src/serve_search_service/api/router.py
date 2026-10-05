@@ -31,6 +31,12 @@ from ..application.router_regex import (
     version_match,
 )
 from ..application.search import HybridSearchService
+from ..application.title_branch import (
+    is_document_number_query,
+    rank_title_documents,
+    title_scores,
+    title_texts,
+)
 from ..domain.embedding import EmbedderUnavailableError, EmbeddingResult
 from ..logging import TraceIdAdapter, get_logger
 from .errors import ApiError
@@ -678,39 +684,6 @@ async def api_hybrid_search(
     opts = payload.search_options or SearchOptions()
 
     # ========================================================
-    # Citation / IDF
-    # ========================================================
-
-    idf_task: asyncio.Task[
-        dict[int, float]
-    ] | None = None
-
-    if opts.citation_enabled():
-        query_tokens, query_indices = query_token_indices(
-            payload.query
-        )
-
-        idf_task = asyncio.create_task(
-            _probe_idf(
-                request.app.state.qdrant_client,
-                payload.collection,
-                query_indices,
-            )
-        )
-
-        _background_probes.add(idf_task)
-
-        idf_task.add_done_callback(
-            _background_probes.discard
-        )
-
-    else:
-        _logger.info(
-            "Citation disabled for this request "
-            "(search_options.citation=false)"
-        )
-
-    # ========================================================
     # Step 0: Router Regex / Identifier Detection
     # ========================================================
 
@@ -863,6 +836,62 @@ async def api_hybrid_search(
         _debug_file_logger.info(
             "keyword_weight=%s",
             keyword_weight,
+        )
+
+    # ========================================================
+    # Title branch (chunk 0) / Citation IDF
+    # ========================================================
+
+    # The title branch fills its own title_result field; result is untouched.
+    # Skipped for code / document-number queries: titles quoting a number
+    # (amendments) would outrank the document itself.
+    title_search_on = opts.title_search_enabled()
+    title_on = (
+        title_search_on
+        and not is_identifier_query
+        and not is_document_number_query(payload.query)
+    )
+
+    if not title_search_on:
+        _logger.info(
+            "Title search disabled for this request "
+            "(search_options.title_search=false)"
+        )
+    elif not title_on:
+        _logger.info(
+            "Title search skipped: document-code or document-number query"
+        )
+
+    # The IDF probe feeds both citation and the title coverage gate.
+    citation_on = opts.citation_enabled()
+
+    if not citation_on:
+        _logger.info(
+            "Citation disabled for this request "
+            "(search_options.citation=false)"
+        )
+
+    idf_task: asyncio.Task[
+        dict[int, float]
+    ] | None = None
+
+    if citation_on or title_on:
+        query_tokens, query_indices = query_token_indices(
+            payload.query
+        )
+
+        idf_task = asyncio.create_task(
+            _probe_idf(
+                request.app.state.qdrant_client,
+                payload.collection,
+                query_indices,
+            )
+        )
+
+        _background_probes.add(idf_task)
+
+        idf_task.add_done_callback(
+            _background_probes.discard
         )
 
     # ========================================================
@@ -1039,8 +1068,27 @@ async def api_hybrid_search(
         )
 
     # ========================================================
-    # Step 3: Search Qdrant
+    # Step 3: Search Qdrant (title branch runs in parallel)
     # ========================================================
+
+    title_task: asyncio.Task[
+        tuple[list[dict[str, Any]], list[dict[str, Any]]]
+    ] | None = None
+
+    if title_on and dense_vector and sparse_vector:
+        title_task = asyncio.create_task(
+            search_service.title_search(
+                payload.collection,
+                dense_vector,
+                sparse_vector,
+                top_k=int(opts.title_top_k),
+                payload_filter=qdrant_filter,
+            )
+        )
+    elif title_on:
+        _logger.info(
+            "Title search skipped: missing dense or sparse query vector"
+        )
 
     fuse_limit = (
         int(payload.limit)
@@ -1080,6 +1128,12 @@ async def api_hybrid_search(
             result.get("status"),
             result.get("detail"),
         )
+
+        if title_task is not None:
+            title_task.cancel()
+            _debug_file_logger.info(
+                "Title search cancelled: main search failed"
+            )
 
         retryable = result.get("status") in (
             503,
@@ -1224,6 +1278,66 @@ async def api_hybrid_search(
         payload.rerank
         and payload.rerank.strategy == "hybrid"
     )
+
+    # Title branch scores (empty when the branch is off or no title covers the query).
+    title_doc_scores: dict[str, float] = {}
+    title_by_document: dict[str, str] = {}
+    title_wait_ms = 0.0
+
+    if title_task is not None:
+        # Extra latency the title branch adds after the main search returns.
+        title_wait_start = time.perf_counter()
+        title_dense, title_sparse = await title_task
+        title_wait_ms = (
+            time.perf_counter()
+            - title_wait_start
+        ) * 1000
+        title_by_document = title_texts(
+            title_dense, title_sparse, document_id_field=doc_id_field
+        )
+        probed = await idf_task if idf_task is not None else {}
+        title_doc_scores = title_scores(
+            _filter_excluded_patterns(title_dense, opts.must_not_conditions),
+            _filter_excluded_patterns(title_sparse, opts.must_not_conditions),
+            idf_from_probe(query_tokens, query_indices, probed),
+            query=payload.query,
+            document_id_field=doc_id_field,
+            rrf_k=int(opts.title_rrf_k),
+            min_coverage=float(opts.title_min_coverage),
+        )
+
+        _logger.info(
+            "Title search completed | wait=%.0fms, "
+            "dense_hits=%d, sparse_hits=%d, candidates=%d, passed=%d "
+            "(top_k=%s, rrf_k=%s, min_coverage=%s)",
+            title_wait_ms,
+            len(title_dense),
+            len(title_sparse),
+            len(title_by_document),
+            len(title_doc_scores),
+            opts.title_top_k,
+            opts.title_rrf_k,
+            opts.title_min_coverage,
+        )
+
+        _debug_file_logger.info(
+            "========== TITLE BRANCH =========="
+        )
+        _debug_file_logger.info(
+            "top_k=%s, rrf_k=%s, min_coverage=%s, "
+            "dense_hits=%d, sparse_hits=%d, candidates=%d, passed=%d",
+            opts.title_top_k,
+            opts.title_rrf_k,
+            opts.title_min_coverage,
+            len(title_dense),
+            len(title_sparse),
+            len(title_by_document),
+            len(title_doc_scores),
+        )
+        _debug_file_logger.info(
+            "title_scores=%s",
+            {d: round(v, 4) for d, v in title_doc_scores.items()},
+        )
 
     identifier_bonus = (
         float(opts.identifier_bonus)
@@ -1807,6 +1921,28 @@ async def api_hybrid_search(
         : int(payload.limit)
     ]
 
+    # With citation on, each title_result item also carries its highlighted title.
+    title_results = rank_title_documents(
+        title_doc_scores,
+        limit=int(payload.limit),
+        titles=title_by_document if citation_on else None,
+        query=payload.query,
+    )
+
+    if title_results:
+        _debug_file_logger.info(
+            "========== TITLE RESULT =========="
+        )
+
+        for item in title_results:
+            _debug_file_logger.info(
+                "#%d doc=%s score=%.4f title=%r",
+                item["rank_document"],
+                item["document_id"],
+                item["title_score"],
+                title_by_document.get(item["document_id"], "")[:80],
+            )
+
     # ========================================================
     # Citation
     # ========================================================
@@ -1814,7 +1950,7 @@ async def api_hybrid_search(
     citation_ms = 0.0
 
     if (
-        idf_task is not None
+        citation_on
         and not document_results
     ):
         _logger.info(
@@ -1822,7 +1958,8 @@ async def api_hybrid_search(
         )
 
     if (
-        idf_task is not None
+        citation_on
+        and idf_task is not None
         and document_results
     ):
         citation_start = time.perf_counter()
@@ -1938,16 +2075,23 @@ async def api_hybrid_search(
 
     _logger.info(
         "Request completed in %.0fms | "
-        "embed=%.0fms, search=%.0fms, "
-        "citation=%.0fms, documents=%d",
+        "embed=%.0fms, search=%.0fms, title_wait=%.0fms, "
+        "citation=%.0fms, documents=%d, title_documents=%s",
         total_ms,
         embed_ms,
         search_ms,
+        title_wait_ms,
         citation_ms,
         len(document_results),
+        len(title_results) if title_search_on else "off",
     )
 
-    return {
+    response: dict[str, Any] = {
         "status": 200,
         "result": document_results,
     }
+
+    if title_search_on:
+        response["title_result"] = title_results
+
+    return response

@@ -79,6 +79,12 @@ class ServiceSettings(BaseSettings):
     # Master switch for the version-matching flow. When false, the query version
     # (e.g. "v4.0") is still extracted but no version bonus is applied.
     default_version_match: bool = True
+    # Title branch: search chunk 0 (title/metadata) in parallel and return the
+    # documents whose title covers the query in a separate title_result field.
+    default_title_search: bool = True
+    default_title_top_k: int = 20
+    default_title_rrf_k: int = 10
+    default_title_min_coverage: float = 0.5
     default_score_threshold: float = 0.2
     # Regex patterns for identifier shape detection (re.IGNORECASE applied automatically).
     # Override via env to extend/narrow what counts as a doc-code or sohieu.
