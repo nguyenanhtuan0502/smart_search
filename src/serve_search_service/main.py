@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from .adapters import QdrantClient
 from .adapters.embedding_engine import Bm25SparseEmbedder, DenseEmbedder
 from .adapters.identity import DevelopmentHeaderTenantResolver
+from .adapters.reranker import Reranker
 from .api.errors import ApiError, handle_api_error, handle_validation_error
 from .api.router import router
 from .application.embedding import EmbeddingService
@@ -48,6 +49,16 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         b=settings.sparse_embedding_b,
         avg_len=settings.sparse_embedding_avg_len,
     )
+    reranker = Reranker(
+        base_url=settings.reranker_url,
+        model=settings.reranker_model,
+        timeout_seconds=settings.reranker_timeout_seconds,
+        api_key=settings.reranker_api_key,
+        max_retries=settings.reranker_max_retries,
+        retry_backoff_seconds=settings.reranker_retry_backoff_seconds,
+        batch_size=settings.reranker_batch_size,
+        qwen3_template=settings.reranker_qwen3_template,
+    )
     embedding_service = EmbeddingService(
         dense=dense_embedder,
         sparse=sparse_embedder,
@@ -64,6 +75,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
         finally:
             await qdrant_client.aclose()
             await dense_embedder.aclose()
+            await reranker.aclose()
 
     app = FastAPI(
         title="Serve Search Service",
@@ -74,6 +86,7 @@ def create_app(settings: ServiceSettings | None = None) -> FastAPI:
     app.state.tenant_resolver = DevelopmentHeaderTenantResolver(settings.dev_tenant_id)
     app.state.qdrant_client = qdrant_client
     app.state.embedding_service = embedding_service
+    app.state.reranker = reranker
     app.state.search_service = HybridSearchService(qdrant_client)
 
     app.include_router(router)

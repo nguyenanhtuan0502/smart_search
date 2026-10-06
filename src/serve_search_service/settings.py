@@ -104,6 +104,25 @@ class ServiceSettings(BaseSettings):
     default_rerank_rrf_k: int = 60
     default_rerank_top_chunks: int = 3
 
+    # Model reranker (Qwen3-Reranker via vLLM /v1/rerank). Reorders fused chunk
+    # candidates before document grouping; on/off overridable per-request via
+    # search_options.model_rerank.
+    default_model_rerank: bool = True
+    reranker_url: str = "http://10.6.14.127:9002"
+    reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+    reranker_api_key: str | None = None
+    reranker_timeout_seconds: float = 30.0
+    reranker_max_retries: int = 2
+    reranker_retry_backoff_seconds: float = 1.0
+    reranker_batch_size: int = 32
+    # Wrap query/document in the official Qwen3-Reranker prompt. Set false if
+    # the serving side already applies the template.
+    reranker_qwen3_template: bool = True
+    default_model_rerank_top_n: int = 50
+    default_rerank_instruction: str = (
+        "Given a web search query, retrieve relevant passages that answer the query"
+    )
+
     default_citation: bool = True
     citation_idf_tau: float = 2.5
     citation_top_keywords: int = 6

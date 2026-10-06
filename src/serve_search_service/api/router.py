@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Request, status
 
 from ..adapters.qdrant import QdrantClient
+from ..adapters.reranker import Reranker, RerankerUnavailableError
 from ..application.citation import (
     CitationConfig,
     build_citations,
@@ -593,6 +594,60 @@ def _documents_matching_identifier(
 # Group chunks -> documents
 # ============================================================
 
+def _chunk_text(item: dict[str, Any]) -> str:
+    chunk_payload = item.get("payload") or {}
+    return str(
+        chunk_payload.get("chunk_text")
+        or chunk_payload.get("chunkText")
+        or chunk_payload.get("text")
+        or chunk_payload.get("content")
+        or ""
+    )
+
+
+async def _model_rerank_chunks(
+    reranker: Reranker,
+    chunk_results: list[dict[str, Any]],
+    *,
+    query: str,
+    top_n: int,
+    instruction: str,
+    base_url: str | None,
+    model: str | None,
+    api_key: str | None,
+) -> list[dict[str, Any]]:
+    """Rescore the top_n fused chunks with the cross-encoder and sort by it.
+
+    Chunks beyond top_n are dropped: reranker scores (0..1) and fusion scores
+    are on different scales and cannot be mixed. The fusion score is kept in
+    ``fused_score`` for debugging.
+    """
+    candidates = chunk_results[:top_n]
+    scores = await reranker.rerank(
+        query,
+        [_chunk_text(item) for item in candidates],
+        instruction=instruction,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+    )
+    if len(scores) != len(candidates):
+        raise RerankerUnavailableError(
+            f"Expected {len(candidates)} scores, got {len(scores)}"
+        )
+    reranked = [
+        {
+            **item,
+            "fused_score": item.get("score"),
+            "score": score,
+            "score_type": "model_rerank",
+        }
+        for item, score in zip(candidates, scores, strict=True)
+    ]
+    reranked.sort(key=lambda item: item["score"], reverse=True)
+    return reranked
+
+
 def _group_chunks_to_documents(
     chunk_results: list[dict[str, Any]],
     document_id_field: str = "document_id",
@@ -900,13 +955,14 @@ async def api_hybrid_search(
 
     _logger.info(
         "POST /v1/search/hybrid | "
-        "collection=%s, query_len=%d, limit=%d, rerank=%s",
+        "collection=%s, query_len=%d, limit=%d, rerank=%s, model_rerank=%s",
         payload.collection,
         len(payload.query),
         int(payload.limit),
         payload.rerank.strategy
         if payload.rerank
         else None,
+        opts.model_rerank_enabled(),
     )
 
     # ========================================================
@@ -1263,6 +1319,91 @@ async def api_hybrid_search(
         chunk_results,
         opts.must_not_conditions,
     )
+
+    # ========================================================
+    # Step 4b: Model rerank (cross-encoder on chunks)
+    # ========================================================
+
+    model_rerank_ms = 0.0
+
+    if not opts.model_rerank_enabled():
+        _logger.info(
+            "Model rerank disabled for this request "
+            "(search_options.model_rerank=false)"
+        )
+    elif is_identifier_query:
+        _logger.info(
+            "Model rerank skipped: document-code query (sparse-only routing)"
+        )
+    elif chunk_results:
+        model_rerank_start = time.perf_counter()
+        top_n = int(opts.model_rerank_top_n)
+
+        try:
+            reranked_chunks = await _model_rerank_chunks(
+                request.app.state.reranker,
+                chunk_results,
+                query=payload.query,
+                top_n=top_n,
+                instruction=opts.rerank_instruction,
+                base_url=payload.reranker_url,
+                model=payload.reranker_model,
+                api_key=payload.reranker_api_key,
+            )
+        except RerankerUnavailableError as e:
+            _logger.warning(
+                "Model rerank failed, keeping fusion order: %s",
+                e,
+            )
+        else:
+            _debug_file_logger.info(
+                "========== MODEL RERANK (top %d of %d chunks) ==========",
+                min(top_n, len(chunk_results)),
+                len(chunk_results),
+            )
+            for rank, item in enumerate(reranked_chunks[:10], 1):
+                item_payload = item.get("payload") or {}
+                _debug_file_logger.info(
+                    "#%d chunk_id=%s document_id=%s chunk_index=%s "
+                    "rerank_score=%.4f fused_score=%s",
+                    rank,
+                    item.get("id"),
+                    item_payload.get("document_id"),
+                    item_payload.get("chunk_index"),
+                    item["score"],
+                    item.get("fused_score"),
+                )
+            n_before = len(chunk_results)
+            chunk_results = reranked_chunks
+            model_rerank_ms = (
+                time.perf_counter()
+                - model_rerank_start
+            ) * 1000
+            _logger.info(
+                "Model rerank completed in %.0fms | "
+                "chunks=%d (from %d), top_score=%.4f",
+                model_rerank_ms,
+                len(chunk_results),
+                n_before,
+                chunk_results[0]["score"] if chunk_results else 0.0,
+            )
+
+            # Reranker scores are absolute relevance (0..1), so score_threshold
+            # applies here regardless of the rerank strategy.
+            if opts.score_threshold is not None:
+                threshold = float(opts.score_threshold)
+                n_before = len(chunk_results)
+                chunk_results = [
+                    item
+                    for item in chunk_results
+                    if item["score"] >= threshold
+                ]
+                _logger.info(
+                    "Model rerank score_threshold=%.2f: chunks %d→%d",
+                    threshold,
+                    n_before,
+                    len(chunk_results),
+                )
 
     # ========================================================
     # Document / rerank configuration
@@ -2075,11 +2216,12 @@ async def api_hybrid_search(
 
     _logger.info(
         "Request completed in %.0fms | "
-        "embed=%.0fms, search=%.0fms, title_wait=%.0fms, "
+        "embed=%.0fms, search=%.0fms, model_rerank=%.0fms, title_wait=%.0fms, "
         "citation=%.0fms, documents=%d, title_documents=%s",
         total_ms,
         embed_ms,
         search_ms,
+        model_rerank_ms,
         title_wait_ms,
         citation_ms,
         len(document_results),
