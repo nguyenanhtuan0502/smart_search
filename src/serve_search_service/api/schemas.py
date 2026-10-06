@@ -170,6 +170,25 @@ class SearchOptions(BaseModel):
             "Built from the chunks the search already returned; ranking is unaffected."
         ),
     )
+    model_rerank: str = Field(
+        default_factory=lambda: str(_settings.default_model_rerank).lower(),
+        description=(
+            "Rerank fused chunks with the cross-encoder model (Qwen3-Reranker) before "
+            "grouping into documents ('true'/'false'). Skipped for document-code queries; "
+            "falls back to fusion order if the reranker is unavailable."
+        ),
+    )
+    model_rerank_top_n: str = Field(
+        default_factory=lambda: str(_settings.default_model_rerank_top_n),
+        description=(
+            "Number of top fused chunks sent to the reranker (1 to 200). Chunks beyond "
+            "this are dropped when model_rerank is on."
+        ),
+    )
+    rerank_instruction: str = Field(
+        default_factory=lambda: _settings.default_rerank_instruction,
+        description="Task instruction given to the reranker together with the query.",
+    )
     score_threshold: str | None = Field(
         default_factory=lambda: (
             None if _settings.default_score_threshold is None
@@ -293,6 +312,31 @@ class SearchOptions(BaseModel):
 
     def citation_enabled(self) -> bool:
         return self.citation.strip().lower() in {"true", "1", "yes"}
+
+    @field_validator("model_rerank")
+    @classmethod
+    def validate_model_rerank_string(cls, v: str) -> str:
+        if v.strip().lower() not in {"true", "false", "1", "0", "yes", "no"}:
+            raise ValueError(
+                f"model_rerank must be a boolean string (true/false), got '{v}'"
+            )
+        return v
+
+    def model_rerank_enabled(self) -> bool:
+        return self.model_rerank.strip().lower() in {"true", "1", "yes"}
+
+    @field_validator("model_rerank_top_n")
+    @classmethod
+    def validate_model_rerank_top_n_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError as err:
+            raise ValueError(
+                f"model_rerank_top_n must be a valid integer string, got '{v}'"
+            ) from err
+        if not (1 <= value <= 200):
+            raise ValueError(f"model_rerank_top_n must be between 1 and 200, got {value}")
+        return v
 
     @field_validator("identifier_bonus")
     @classmethod
@@ -595,6 +639,21 @@ class HybridSearchRequest(BaseModel):
         default=None,
         min_length=1,
         description="Override the API key sent to the embedding gateway (default: from env)",
+    )
+    reranker_url: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override the reranker base URL (default: from env)",
+    )
+    reranker_model: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override the reranker model (default: from env)",
+    )
+    reranker_api_key: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Override the API key sent to the reranker (default: from env)",
     )
 
     category_parent_id: str | None = Field(
