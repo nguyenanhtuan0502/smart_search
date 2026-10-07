@@ -71,12 +71,12 @@ _SEG_OPT_DIGIT_RE = re.compile(_SEG_OPT_DIGIT, re.IGNORECASE)
 _SEG_LETTERS = r"[a-z]{1,4}"
 _SEG_LETTERS_RE = re.compile(_SEG_LETTERS, re.IGNORECASE)
 
-# Leading "PLxx" family prefix, e.g. "pl01", "pl36".
-_PL_PREFIX_RE = re.compile(r"pl\d{1,3}", re.IGNORECASE)
+# Leading "PLxx" family prefix, e.g. "pl01", "pl36". (env-overridable)
+_PL_PREFIX_RE = re.compile(_settings.default_pl_prefix_pattern, re.IGNORECASE)
 
-# Family prefix candidate: 1-4 chars of letters and/or digits.
+# Family prefix candidate: 1-4 chars of letters and/or digits. (env-overridable)
 # (Length is checked separately by the caller.)
-_FAMILY_PREFIX_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
+_FAMILY_PREFIX_RE = re.compile(_settings.default_family_prefix_pattern, re.IGNORECASE)
 
 # Số hiệu shape components: <1..5 digits>/<4-digit year>/<suffix segments>.
 _SOHIEU_NUM_RE = re.compile(r"\d{1,5}")
@@ -96,32 +96,15 @@ _PATH_MULTI_SLASH_RE = re.compile(r"/+")
 # TRAILING NATURAL LANGUAGE
 # ============================================================
 
-_TRAILING_RE = re.compile(
-    r"\s*(?:"
-    r"la\s*ma\s*cua\s*van\s*ban\s*(?:nao|gi)?"
-    r"|la\s*(?:gi|van\s*ban\s*(?:nao|gi)?|tai\s*lieu\s*(?:nao|gi)?)?"
-    r"|noi\s*ve\s*gi"
-    r"|la\s*cua\s*ai"
-    r"|the\s*nao"
-    r"|o\s*dau"
-    r")\s*$",
-    re.IGNORECASE,
-)
+# (env-overridable + per-request qua detect())
+_TRAILING_RE = re.compile(_settings.default_trailing_nl_pattern, re.IGNORECASE)
 
 
-_LOOKUP_TAIL_RE = re.compile(
-    r"\s+la\s*(?:"
-    r"ma\s*cua\s*van\s*ban"
-    r"|van\s*ban"
-    r"|gi"
-    r"|tai\s*lieu"
-    r")"
-    r"(?:\s*(?:nao|gi))?\s*$",
-    re.IGNORECASE,
-)
+# (env-overridable + per-request qua detect())
+_LOOKUP_TAIL_RE = re.compile(_settings.default_lookup_tail_pattern, re.IGNORECASE)
 
 
-_MAX_WHOLE_WORDS = 8
+_MAX_WHOLE_WORDS = _settings.default_max_whole_words
 
 
 # ============================================================
@@ -139,7 +122,7 @@ _NORMALIZE_STRIP_RE = re.compile(r"[\s./\\\-]+")
 #   v1.1
 #   v2.
 _VERSION_SUFFIX_EXPLICIT_RE = re.compile(
-    r"(?:^|\s+)(v\d+(?:[._/-]\d+){0,4})\.?\s*$",
+    _settings.default_version_explicit_pattern,
     re.IGNORECASE,
 )
 
@@ -152,7 +135,7 @@ _VERSION_SUFFIX_EXPLICIT_RE = re.compile(
 #   030/2022
 # is NOT interpreted as a version.
 _BARE_VERSION_SUFFIX_RAW_RE = re.compile(
-    r"\s+(\d+(?:[._/-]\d+)+)\.?\s*$",
+    _settings.default_version_bare_pattern,
     re.IGNORECASE,
 )
 
@@ -169,8 +152,7 @@ _BARE_VERSION_SUFFIX_RAW_RE = re.compile(
 # because that has no version keyword). The captured group is the number only;
 # normalize_version() adds the "v" prefix.
 _VERSION_KEYWORD_SUFFIX_RE = re.compile(
-    r"\s+(?:version|ver|phien\s*ban|ban)\s*[:\-]?\s*"
-    r"(\d+(?:[._/-]\d+){0,4})\.?\s*$",
+    _settings.default_version_keyword_pattern,
     re.IGNORECASE,
 )
 
@@ -588,6 +570,8 @@ def detect(
     query: str,
     code_shape_pattern: str = "",
     sohieu_shape_pattern: str = "",
+    max_whole_words: int | None = None,
+    trailing_nl_pattern: str = "",
 ) -> DocCodeDetection:
     """Detect whether *query* looks like a document code or số hiệu.
 
@@ -602,9 +586,23 @@ def detect(
         Optional regex string to override the built-in ``_SO_HIEU_SHAPE_RE``.
         Empty string (default) keeps the built-in pattern.
     """
-    # Compile per-request override patterns when provided (different from module-level defaults).
-    _code_re   = re.compile(code_shape_pattern,   re.IGNORECASE) if code_shape_pattern   != _settings.default_code_shape_pattern   else _CODE_SHAPE_RE
-    _sohieu_re = re.compile(sohieu_shape_pattern, re.IGNORECASE) if sohieu_shape_pattern != _settings.default_sohieu_shape_pattern else _SO_HIEU_SHAPE_RE
+    # Compile per-request override patterns when provided (khác module default).
+    _code_re = (
+        re.compile(code_shape_pattern, re.IGNORECASE)
+        if code_shape_pattern != _settings.default_code_shape_pattern
+        else _CODE_SHAPE_RE
+    )
+    _sohieu_re = (
+        re.compile(sohieu_shape_pattern, re.IGNORECASE)
+        if sohieu_shape_pattern != _settings.default_sohieu_shape_pattern
+        else _SO_HIEU_SHAPE_RE
+    )
+    _max_words = max_whole_words if max_whole_words is not None else _MAX_WHOLE_WORDS
+    _trailing_re = (
+        re.compile(trailing_nl_pattern, re.IGNORECASE)
+        if trailing_nl_pattern and trailing_nl_pattern != _settings.default_trailing_nl_pattern
+        else _TRAILING_RE
+    )
 
     clean_query = strip_diacritics(query).strip()
 
@@ -622,10 +620,7 @@ def detect(
 
     # Use the version-free query only when it is otherwise the same query.
     # Natural-language tails are handled separately below.
-    if version:
-        norm_for_detection = version_base
-    else:
-        norm_for_detection = norm
+    norm_for_detection = version_base if version else norm
 
     # --------------------------------------------------------
     # Step 1: extract embedded identifier from sentence
@@ -650,7 +645,7 @@ def detect(
             # ------------------------------------------------
             # Step 3: short whole-query detection
             # ------------------------------------------------
-            if len(norm_for_detection.split()) > _MAX_WHOLE_WORDS:
+            if len(norm_for_detection.split()) > _max_words:
                 return DocCodeDetection(
                     is_doc_code=False,
                     kind="none",
@@ -666,7 +661,7 @@ def detect(
     # --------------------------------------------------------
     # Remove natural-language tail
     # --------------------------------------------------------
-    candidate = _TRAILING_RE.sub(
+    candidate = _trailing_re.sub(
         "",
         candidate,
     ).strip()
@@ -856,7 +851,7 @@ def identifier_family_match(
     if len(qcore) == len(score):
         family_used = False
 
-        for qseg, sseg in zip(qcore, score):
+        for qseg, sseg in zip(qcore, score, strict=True):
             if qseg == sseg:
                 continue
 
@@ -1206,9 +1201,10 @@ def identifier_extra_retrieval_queries(
 
     original_stripped = original_query.strip()
     original_ascii = strip_diacritics(original_stripped).lower()
-    if path and original_ascii != original_stripped.lower():
-        add(path)
-    elif path and normalize_identifier_path(original_stripped) != path:
+    if path and (
+        original_ascii != original_stripped.lower()
+        or normalize_identifier_path(original_stripped) != path
+    ):
         add(path)
     add(identifier_family_retrieval_query(detection))
 
