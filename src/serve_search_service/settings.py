@@ -66,7 +66,7 @@ class ServiceSettings(BaseSettings):
     default_keyword_weight: float = 0.3
     default_rrf_k: int = 5
     default_candidate_multiplier: int = 5
-    default_fusion_mode: str = "client"
+    default_fusion_mode: str = "batch_client_rrf"
     max_candidate_limit: int = 500  # Hard limit on candidate retrieval
     # Dynamic routing for document-code / số-hiệu queries (router_regex feature).
     default_auto_route: bool = True
@@ -76,9 +76,12 @@ class ServiceSettings(BaseSettings):
     # the exact-version document within the same docMaVanBan family without
     # turning the version into part of the identifier.
     default_version_bonus: float = 0.4
-    # Master switch for the version-matching flow. When false, the query version
+    # Master switch for the version-matching flow . When false, the query version
     # (e.g. "v4.0") is still extracted but no version bonus is applied.
     default_version_match: bool = True
+    # Với query MÃ/SỐ HIỆU: sắp lại doc đã match theo (khớp 100% > một phần),
+    # (isShow='Y' chính > 'N' phụ), (mã tự nhiên PL01<PL02<PL10). Overridable.
+    default_identifier_primary_sort: bool = True
     # Title branch: search chunk 0 (title/metadata) in parallel and return the
     # documents whose title covers the query in a separate title_result field.
     default_title_search: bool = True
@@ -97,7 +100,53 @@ class ServiceSettings(BaseSettings):
     default_sohieu_shape_pattern: str = (
         r"^\d{1,5}/\d{4}(?:/[a-z0-9]{1,12}){0,6}$"
     )
-    
+
+    # --- Identifier detection: natural-language / version / family patterns ---
+    # (re.IGNORECASE applied automatically). Mirror the hardcoded regex in
+    # router_regex.py. Override via env SERVE_SEARCH_DEFAULT_* without touching
+    # code; the NL/version ones are also overridable per-request (search_options).
+    #
+    # Query dài hơn ngưỡng này (số TỪ) không được coi là identifier (câu tự nhiên).
+    default_max_whole_words: int = 8
+    # Đuôi câu hỏi tiếng Việt bỏ khi tách identifier ("... là mã của văn bản nào").
+    default_trailing_nl_pattern: str = (
+        r"\s*(?:"
+        r"la\s*ma\s*cua\s*van\s*ban\s*(?:nao|gi)?"
+        r"|la\s*(?:gi|van\s*ban\s*(?:nao|gi)?|tai\s*lieu\s*(?:nao|gi)?)?"
+        r"|noi\s*ve\s*gi"
+        r"|la\s*cua\s*ai"
+        r"|the\s*nao"
+        r"|o\s*dau"
+        r")\s*$"
+    )
+    # Đuôi "... là mã của văn bản" dùng để nhận biết câu hỏi tra cứu.
+    default_lookup_tail_pattern: str = (
+        r"\s+la\s*(?:"
+        r"ma\s*cua\s*van\s*ban"
+        r"|van\s*ban"
+        r"|gi"
+        r"|tai\s*lieu"
+        r")"
+        r"(?:\s*(?:nao|gi))?\s*$"
+    )
+    # Hậu tố version tường minh: v1, v2, v1.0, v1.1 ...
+    default_version_explicit_pattern: str = (
+        r"(?:^|\s+)(v\d+(?:[._/-]\d+){0,4})\.?\s*$"
+    )
+    # Hậu tố version theo từ khoá: "version 4", "ver 4.0", "phien ban 4", "ban 4".
+    default_version_keyword_pattern: str = (
+        r"\s+(?:version|ver|phien\s*ban|ban)\s*[:\-]?\s*"
+        r"(\d+(?:[._/-]\d+){0,4})\.?\s*$"
+    )
+    # Hậu tố version dạng số trần: " 2.0", " 3.1" (bắt buộc khoảng trắng trước).
+    default_version_bare_pattern: str = (
+        r"\s+(\d+(?:[._/-]\d+)+)\.?\s*$"
+    )
+    # Tiền tố họ "PLxx" ở đầu mã (pl01, pl36). Dùng khi so khớp family.
+    default_pl_prefix_pattern: str = r"pl\d{1,3}"
+    # Ứng viên tiền tố họ: 1-4 ký tự chữ/số (độ dài kiểm tra riêng ở caller).
+    default_family_prefix_pattern: str = r"[a-z0-9]+"
+
     # Rerank defaults (overridable per-request via rerank option).
     default_rerank_strategy: str = "hybrid"
     default_rerank_mean_m: int = 3

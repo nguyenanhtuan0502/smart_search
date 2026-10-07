@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter
 from dataclasses import asdict
@@ -711,6 +712,101 @@ def _group_chunks_to_documents(
     ]
 
 
+def _build_doc_payload_map(
+    chunk_results: list[dict[str, Any]],
+    document_id_field: str = "document_id",
+) -> dict[str, dict[str, Any]]:
+    """Map document_id -> payload (lấy chunk đầu tiên gặp của mỗi doc).
+
+    Mọi chunk của cùng 1 doc chia sẻ docSoHieu/isShow nên lấy chunk nào cũng được.
+    """
+    doc_payload: dict[str, dict[str, Any]] = {}
+    for item in chunk_results:
+        payload = item.get("payload") or {}
+        doc_id = payload.get(document_id_field)
+        if doc_id is None:
+            continue
+        doc_id = str(doc_id)
+        if doc_id not in doc_payload:
+            doc_payload[doc_id] = payload
+    return doc_payload
+
+
+# Các matched_field biểu thị khớp MÃ/SỐ HIỆU 100% (exact), ưu tiên cao nhất.
+_EXACT_MATCH_FIELDS = frozenset({"docMaVanBan", "docSoHieu"})
+
+_NAT_SPLIT_RE = re.compile(r"(\d+)")
+
+
+def _natural_key(text: str) -> tuple:
+    """Khoá sắp xếp tự nhiên: 'PL2' < 'PL10' (so số theo giá trị, chữ theo alpha)."""
+    parts = _NAT_SPLIT_RE.split(str(text).strip().lower())
+    key: list = []
+    for p in parts:
+        if p.isdigit():
+            key.append((1, int(p)))      # số: so theo giá trị
+        elif p:
+            key.append((0, p))           # chữ: so theo alpha
+    return tuple(key)
+
+
+def _reorder_identifier_by_exactness_and_isshow(
+    ordered_doc_ids: list[str],
+    doc_payload: dict[str, dict[str, Any]],
+    exact_match_docs: set[str],
+    matched_docs: set[str],
+) -> list[str]:
+    """Sắp lại ổn định cho luồng MÃ VĂN BẢN / SỐ HIỆU (identifier query).
+
+    Trong các document ĐÃ identifier-match (``matched_docs``), ưu tiên:
+      1. Khớp MÃ 100% (``exact_match_docs``) lên trước khớp MỘT PHẦN
+         (family/prefix/typo). VD query 'QD01/ICC': doc có docMaVanBan=='QD01/ICC'
+         lên trên 'PL10.QD01/ICC'.
+      2. Cùng mức khớp -> văn bản chính (isShow=='Y') trước văn bản phụ ('N').
+      3. Cùng tier -> sắp theo docMaVanBan tự nhiên (PL01 < PL02 < PL10).
+
+    Document KHÔNG match giữ nguyên vị trí tương đối (xếp sau khối matched theo
+    đúng thứ tự cũ).
+    """
+    if not ordered_doc_ids or not matched_docs:
+        return ordered_doc_ids
+
+    def _is_primary(doc_id: str) -> bool:
+        p = doc_payload.get(doc_id) or {}
+        return str(p.get("isShow", "")).strip().upper() == "Y"
+
+    def _ma(doc_id: str) -> str:
+        p = doc_payload.get(doc_id) or {}
+        return str(p.get("docMaVanBan") or "")
+
+    def _tier(doc_id: str) -> int:
+        # 0 = exact + chính, 1 = exact + phụ, 2 = partial + chính,
+        # 3 = partial + phụ, 4 = không match (giữ cuối, nguyên thứ tự).
+        if doc_id not in matched_docs:
+            return 4
+        exact = doc_id in exact_match_docs
+        primary = _is_primary(doc_id)
+        if exact and primary:
+            return 0
+        if exact:
+            return 1
+        if primary:
+            return 2
+        return 3
+
+    # Nếu mọi matched doc đã cùng tier thì vẫn có thể cần sắp alpha trong tier.
+    def _sort_key(pair: tuple[int, str]) -> tuple:
+        idx, did = pair
+        t = _tier(did)
+        if t == 4:
+            # Doc không match: giữ nguyên thứ tự gốc, luôn xếp sau (dùng idx).
+            return (t, idx)
+        # Matched: theo tier -> mã tự nhiên (PL01<PL02<PL10) -> thứ tự gốc.
+        return (t, _natural_key(_ma(did)), idx)
+
+    return [d for _, d in sorted(enumerate(ordered_doc_ids), key=_sort_key)]
+
+
 # ============================================================
 # Search API
 # ============================================================
@@ -735,6 +831,10 @@ async def api_hybrid_search(
     )
 
     total_start = time.perf_counter()
+
+    # Khởi tạo sẵn để timings an toàn kể cả khi không chạy rerank/citation.
+    rerank_ms = 0.0
+    idf_wait_ms = 0.0
 
     opts = payload.search_options or SearchOptions()
 
@@ -761,6 +861,8 @@ async def api_hybrid_search(
             payload.query,
             code_shape_pattern=opts.code_shape_pattern,
             sohieu_shape_pattern=opts.sohieu_shape_pattern,
+            max_whole_words=int(opts.max_whole_words),
+            trailing_nl_pattern=opts.trailing_nl_pattern,
         )
         if auto_route
         else None
@@ -1515,6 +1617,13 @@ async def api_hybrid_search(
         for match in identifier_matches
     }
 
+    # Doc khớp MÃ/SỐ HIỆU 100% (exact) — dùng để ưu tiên trên khớp một phần.
+    exact_match_docs = {
+        str(match["document_id"])
+        for match in identifier_matches
+        if match.get("matched_field") in _EXACT_MATCH_FIELDS
+    }
+
     # ========================================================
     # VERSION MATCH - DOCUMENT LEVEL
     #
@@ -1932,6 +2041,27 @@ async def api_hybrid_search(
                 ) >= threshold
             ]
 
+        # IDENTIFIER (mã văn bản / số hiệu): ưu tiên khớp 100% trên khớp một
+        # phần, rồi văn bản chính (isShow='Y') trước văn bản phụ ('N'), rồi mã
+        # tự nhiên. Stable, opt-in qua identifier_primary_sort.
+        if (
+            is_identifier_query
+            and matched_docs
+            and opts.identifier_primary_sort_enabled()
+        ):
+            doc_payload_map = _build_doc_payload_map(chunk_results, doc_id_field)
+            cur_order = [str(d["document_id"]) for d in reranked]
+            new_order = _reorder_identifier_by_exactness_and_isshow(
+                cur_order, doc_payload_map, exact_match_docs, matched_docs,
+            )
+            if new_order != cur_order:
+                by_id = {str(d["document_id"]): d for d in reranked}
+                reranked = [by_id[did] for did in new_order]
+                _debug_file_logger.info(
+                    "IDENTIFIER EXACT/ISSHOW REORDER applied | new_order=%s",
+                    new_order,
+                )
+
         document_results = [
             {
                 "document_id": doc["document_id"],
@@ -2011,6 +2141,28 @@ async def api_hybrid_search(
                     1,
                 )
             ]
+
+        # IDENTIFIER: khớp 100% trên khớp một phần, rồi isShow='Y' trước 'N',
+        # rồi mã tự nhiên. Opt-in qua identifier_primary_sort.
+        if (
+            is_identifier_query
+            and matched_docs
+            and opts.identifier_primary_sort_enabled()
+        ):
+            doc_payload_map = _build_doc_payload_map(chunk_results, doc_id_field)
+            cur_order = [str(d["document_id"]) for d in document_results]
+            new_order = _reorder_identifier_by_exactness_and_isshow(
+                cur_order, doc_payload_map, exact_match_docs, matched_docs,
+            )
+            if new_order != cur_order:
+                document_results = [
+                    {"document_id": did, "rank_document": rank}
+                    for rank, did in enumerate(new_order, 1)
+                ]
+                _debug_file_logger.info(
+                    "IDENTIFIER EXACT/ISSHOW REORDER (no-rerank) | new_order=%s",
+                    new_order,
+                )
 
     # ========================================================
     # DEBUG: FINAL DOCUMENT ORDER BEFORE LIMIT
@@ -2235,5 +2387,18 @@ async def api_hybrid_search(
 
     if title_search_on:
         response["title_result"] = title_results
+
+    # Opt-in: trả latency từng stage để client/UAT đo được mà không cần log server.
+    if opts.include_timings_enabled():
+        response["timings"] = {
+            "total_ms": round(total_ms, 1),
+            "embed_ms": round(embed_ms, 1),
+            "search_ms": round(search_ms, 1),
+            "model_rerank_ms": round(model_rerank_ms, 1),
+            "title_wait_ms": round(title_wait_ms, 1),
+            "rerank_ms": round(rerank_ms, 1),
+            "citation_ms": round(citation_ms, 1),
+            "idf_wait_ms": round(idf_wait_ms, 1),
+        }
 
     return response

@@ -104,6 +104,20 @@ class SearchOptions(BaseModel):
             "Default: r'^[a-z]{1,4}\\d{0,3}[a-z]?(?:/[a-z]{1,4}\\d{0,3}[a-z]?){1,5}$'"
         ),
     )
+    max_whole_words: str = Field(
+        default_factory=lambda: str(_settings.default_max_whole_words),
+        description=(
+            "Query dài hơn ngưỡng này (số TỪ) không được coi là identifier "
+            "(câu tự nhiên). Override env SERVE_SEARCH_DEFAULT_MAX_WHOLE_WORDS."
+        ),
+    )
+    trailing_nl_pattern: str = Field(
+        default_factory=lambda: _settings.default_trailing_nl_pattern,
+        description=(
+            "Regex đuôi câu hỏi tiếng Việt bỏ khi tách identifier (re.IGNORECASE). "
+            "Override env SERVE_SEARCH_DEFAULT_TRAILING_NL_PATTERN."
+        ),
+    )
     sohieu_shape_pattern: str = Field(
         default_factory=lambda: _settings.default_sohieu_shape_pattern,
         description=(
@@ -137,6 +151,15 @@ class SearchOptions(BaseModel):
             "Ignored when version_match is 'false'."
         ),
     )
+    identifier_primary_sort: str = Field(
+        default_factory=lambda: str(_settings.default_identifier_primary_sort).lower(),
+        description=(
+            "Với query MÃ/SỐ HIỆU: sắp lại các document đã match theo thứ tự "
+            "(1) khớp 100% trước khớp một phần, (2) văn bản chính isShow='Y' trước "
+            "phụ 'N', (3) mã văn bản theo thứ tự tự nhiên (PL01<PL02<PL10) "
+            "('true'/'false'). 'false' = giữ nguyên thứ hạng rerank/bonus."
+        ),
+    )
     title_search: str = Field(
         default_factory=lambda: str(_settings.default_title_search).lower(),
         description=(
@@ -168,6 +191,14 @@ class SearchOptions(BaseModel):
         description=(
             "Attach highlighted snippets to each document result ('true'/'false'). "
             "Built from the chunks the search already returned; ranking is unaffected."
+        ),
+    )
+    include_timings: str = Field(
+        default="false",
+        description=(
+            "Trả về block 'timings' (ms từng stage: embed/search/rerank/citation...) "
+            "trong response ('true'/'false'). Dùng để đo latency từ client/UAT mà "
+            "không cần đọc log server. Không ảnh hưởng ranking."
         ),
     )
     model_rerank: str = Field(
@@ -238,8 +269,10 @@ class SearchOptions(BaseModel):
     def validate_weight_string(cls, v: str) -> str:
         try:
             value = float(v)
-        except ValueError:
-            raise ValueError(f"Weight must be a valid number string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"Weight must be a valid number string, got '{v}'"
+            ) from err
         if not (0.0 <= value <= 1.0):
             raise ValueError(f"Weight must be between 0.0 and 1.0, got {value}")
         return v
@@ -249,8 +282,10 @@ class SearchOptions(BaseModel):
     def validate_rrf_k_string(cls, v: str) -> str:
         try:
             value = int(v)
-        except ValueError:
-            raise ValueError(f"rrf_k must be a valid integer string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"rrf_k must be a valid integer string, got '{v}'"
+            ) from err
         if not (1 <= value <= 200):
             raise ValueError(f"rrf_k must be between 1 and 200, got {value}")
         return v
@@ -260,10 +295,14 @@ class SearchOptions(BaseModel):
     def validate_candidate_multiplier_string(cls, v: str) -> str:
         try:
             value = int(v)
-        except ValueError:
-            raise ValueError(f"candidate_multiplier must be a valid integer string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"candidate_multiplier must be a valid integer string, got '{v}'"
+            ) from err
         if not (2 <= value <= 20):
-            raise ValueError(f"candidate_multiplier must be between 2 and 20, got {value}")
+            raise ValueError(
+                f"candidate_multiplier must be between 2 and 20, got {value}"
+            )
         return v
 
     @field_validator("auto_route")
@@ -275,13 +314,28 @@ class SearchOptions(BaseModel):
             )
         return v
 
-    @field_validator("code_shape_pattern", "sohieu_shape_pattern")
+    @field_validator(
+        "code_shape_pattern", "sohieu_shape_pattern", "trailing_nl_pattern"
+    )
     @classmethod
     def validate_regex_pattern(cls, v: str) -> str:
         try:
             re.compile(v)
         except re.error as exc:
             raise ValueError(f"Invalid regex pattern {v!r}: {exc}") from exc
+        return v
+
+    @field_validator("max_whole_words")
+    @classmethod
+    def validate_max_whole_words_string(cls, v: str) -> str:
+        try:
+            value = int(v)
+        except ValueError as err:
+            raise ValueError(
+                f"max_whole_words must be a valid integer string, got '{v}'"
+            ) from err
+        if value < 1:
+            raise ValueError(f"max_whole_words must be >= 1, got {value}")
         return v
 
     def auto_route_enabled(self) -> bool:
@@ -301,6 +355,10 @@ class SearchOptions(BaseModel):
         """Parse version_match string to bool for internal use."""
         return self.version_match.strip().lower() in {"true", "1", "yes"}
 
+    def identifier_primary_sort_enabled(self) -> bool:
+        """Parse identifier_primary_sort string to bool for internal use."""
+        return self.identifier_primary_sort.strip().lower() in {"true", "1", "yes"}
+
     @field_validator("citation")
     @classmethod
     def validate_citation_string(cls, v: str) -> str:
@@ -312,6 +370,10 @@ class SearchOptions(BaseModel):
 
     def citation_enabled(self) -> bool:
         return self.citation.strip().lower() in {"true", "1", "yes"}
+
+    def include_timings_enabled(self) -> bool:
+        """Parse include_timings string to bool for internal use."""
+        return self.include_timings.strip().lower() in {"true", "1", "yes"}
 
     @field_validator("model_rerank")
     @classmethod
@@ -432,7 +494,8 @@ class RerankOptions(BaseModel):
     weights: str | None = Field(
         default=None,
         description=(
-            "Hybrid strategy weights as string: '(w1, w2, w3, w4)' for (maxp, top_m_mean, hit_count, rrf). "
+            "Hybrid strategy weights as string: '(w1, w2, w3, w4)' for "
+            "(maxp, top_m_mean, hit_count, rrf). "
             "Must sum to 1.0. Only used when strategy='hybrid'."
         ),
     )
@@ -471,8 +534,10 @@ class RerankOptions(BaseModel):
     def validate_mean_m_string(cls, v: str) -> str:
         try:
             value = int(v)
-        except ValueError:
-            raise ValueError(f"mean_m must be a valid integer string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"mean_m must be a valid integer string, got '{v}'"
+            ) from err
         if value < 1:
             raise ValueError(f"mean_m must be >= 1, got {value}")
         return v
@@ -482,8 +547,10 @@ class RerankOptions(BaseModel):
     def validate_rrf_k_string(cls, v: str) -> str:
         try:
             value = int(v)
-        except ValueError:
-            raise ValueError(f"rrf_k must be a valid integer string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"rrf_k must be a valid integer string, got '{v}'"
+            ) from err
         if value <= 0:
             raise ValueError(f"rrf_k must be > 0, got {value}")
         return v
@@ -493,8 +560,10 @@ class RerankOptions(BaseModel):
     def validate_top_chunks_string(cls, v: str) -> str:
         try:
             value = int(v)
-        except ValueError:
-            raise ValueError(f"top_chunks must be a valid integer string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"top_chunks must be a valid integer string, got '{v}'"
+            ) from err
         if not (1 <= value <= 20):
             raise ValueError(f"top_chunks must be between 1 and 20, got {value}")
         return v
@@ -506,9 +575,11 @@ class RerankOptions(BaseModel):
         if self.weights is not None:
             try:
                 weight_values = self._parse_weights(self.weights)
-            except ValueError:
-                raise ValueError(f"weights must be comma-separated floats, got '{self.weights}'")
-            
+            except ValueError as err:
+                raise ValueError(
+                    f"weights must be comma-separated floats, got '{self.weights}'"
+                ) from err
+
             if len(weight_values) != 4:
                 raise ValueError(f"weights must have exactly 4 values, got {len(weight_values)}")
             
@@ -705,8 +776,10 @@ class HybridSearchRequest(BaseModel):
     def validate_limit_string(cls, v: str) -> str:
         try:
             value = int(v)
-        except ValueError:
-            raise ValueError(f"limit must be a valid integer string, got '{v}'")
+        except ValueError as err:
+            raise ValueError(
+                f"limit must be a valid integer string, got '{v}'"
+            ) from err
         if not (1 <= value <= 100):
             raise ValueError(f"limit must be between 1 and 100, got {value}")
         return v
@@ -790,6 +863,27 @@ class TitleResultItem(BaseModel):
     )
 
 
+class StageTimings(BaseModel):
+    """Per-stage latency in milliseconds (for diagnostics / benchmarking)."""
+
+    total_ms: float = Field(description="Tổng thời gian xử lý request")
+    embed_ms: float = Field(default=0.0, description="Embed query (dense + sparse)")
+    search_ms: float = Field(default=0.0, description="Qdrant retrieval + fusion")
+    model_rerank_ms: float = Field(
+        default=0.0, description="Model-based rerank (Qwen3 reranker), 0 nếu tắt"
+    )
+    title_wait_ms: float = Field(
+        default=0.0, description="Chờ nhánh title branch (song song)"
+    )
+    rerank_ms: float = Field(
+        default=0.0, description="Rule-based rerank (maxp/hybrid...) + identifier bonus"
+    )
+    citation_ms: float = Field(default=0.0, description="Build citation / highlight")
+    idf_wait_ms: float = Field(
+        default=0.0, description="Chờ IDF probe (nằm trong citation_ms)"
+    )
+
+
 class HybridSearchResponse(BaseModel):
 
     status: int = 200
@@ -800,5 +894,15 @@ class HybridSearchResponse(BaseModel):
         description=(
             "Title branch documents, present only when search_options.title_search "
             "is 'true'"
+        ),
+    )
+    timings: StageTimings | None = Field(
+        default=None,
+        exclude_if=lambda v: v is None,
+        description=(
+            "Per-stage latency in milliseconds. Present only when "
+            "search_options.include_timings is 'true'. Lets external callers "
+            "(e.g. UAT benchmark tools) measure embed/search/rerank/citation "
+            "latency without server log access."
         ),
     )
