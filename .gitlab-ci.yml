@@ -1,0 +1,166 @@
+# GitLab CI — serve-search-service
+# Workflow equivalent to mas-index-service and mas-search-service.
+
+workflow:
+  rules:
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH =~ /^(dev|develop)$/'
+      variables:
+        DEPLOY_ENV: "dev"
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH == "uat"'
+      variables:
+        DEPLOY_ENV: "uat"
+    - if: '($CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "web") && $CI_COMMIT_BRANCH =~ /^release\/.+$/'
+      variables:
+        DEPLOY_ENV: "rel"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+      variables:
+        DEPLOY_ENV: "exp"
+    - when: never
+
+.containerize:
+  stage: containerize
+  image: ebit.tpb.vn/podman/stable:v3.4.0
+  before_script:
+    - echo $REGISTRY_PASS | podman login --tls-verify=false $REGISTRY_HOST --username builder --password-stdin
+
+.deliver:
+  stage: deliver
+  image: ebit.tpb.vn/edf/duonght2-utl:v1.2
+  variables:
+    GIT_STRATEGY: none
+    TOKEN: $OCP_GENAI_TOKEN
+
+.deploy:
+  stage: deploy
+  image: ebit.tpb.vn/edf/duonght2-utl:v1.2
+  variables:
+    GIT_STRATEGY: none
+    KUBECONFIG: kubeconfig.yml
+  before_script:
+    - echo $OCP_GENAI_KUBECONFIG | base64 -d > kubeconfig.yml
+
+variables:
+  MODULE: serve-search-service
+  PROJECT: genai-private
+  GIT_STRATEGY: clone
+  REGISTRY_INTERNAL: "image-registry.openshift-image-registry.svc:5000"
+  TAG: "$DEPLOY_ENV-$CI_COMMIT_SHORT_SHA.$CI_PIPELINE_IID"
+  BUILD_ID: "$MODULE-$TAG"
+  IMG_SRC: $REGISTRY_HOST/$PROJECT/$MODULE:$TAG
+  ISTAG: "$MODULE:$TAG"
+  IMAGE_FILE: "$BUILD_ID.tar"
+  OUT_DIR: "$MODULE-$DEPLOY_ENV"
+
+stages:
+  - containerize
+  - deliver
+  - deploy
+
+preflight:
+  stage: .pre
+  tags: [podman]
+  variables:
+    GIT_STRATEGY: none
+  rules:
+    - if: '$DEPLOY_ENV =~ /^(dev|uat|rel|exp)$/'
+      when: on_success
+    - when: never
+  script:
+    - ': "${MODULE:?MODULE chua duoc dat}"'
+    - ': "${PROJECT:?PROJECT chua duoc dat}"'
+    - ': "${DEPLOY_ENV:?DEPLOY_ENV chua duoc dat}"'
+
+.gate:always:
+  rules:
+    - if: '$DEPLOY_ENV =~ /^(dev|uat|rel|exp)$/'
+      when: on_success
+    - when: never
+
+.gate:deploy:
+  rules:
+    - if: '$DEPLOY_ENV == "dev"'
+      when: on_success
+    - when: never
+
+containerize:build:
+  extends:
+    - .containerize
+    - .gate:always
+  tags: [podman]
+  interruptible: true
+  script:
+    - |
+      BUILD_ARGS=""
+      if [ -n "$PIP_INDEX_URL" ]; then
+        BUILD_ARGS="--build-arg PIP_INDEX_URL=$PIP_INDEX_URL"
+      fi
+      podman build -f ./Dockerfile-deploy $BUILD_ARGS -t $IMG_SRC .
+    - echo "IMAGE = $IMG_SRC"
+    - rm -rf "$OUT_DIR"
+    - mkdir -p "$OUT_DIR"
+    - podman save -o "$OUT_DIR/$IMAGE_FILE" "$IMG_SRC"
+    - test -s "$OUT_DIR/$IMAGE_FILE"
+    - ls -lh "$OUT_DIR/$IMAGE_FILE"
+    - echo "$CI_PROJECT_URL/-/jobs/$CI_JOB_ID/artifacts/raw/$OUT_DIR/$IMAGE_FILE"
+  after_script:
+    - podman rmi -f $IMG_SRC || true
+    - podman image prune -f --filter until=72h || true
+  artifacts:
+    expire_in: 7 days
+    paths:
+      - "serve-search-service-*"
+
+deliver:upload-image:
+  extends:
+    - .deliver
+    - .gate:always
+  needs: ["containerize:build"]
+  dependencies:
+    - "containerize:build"
+  script:
+    - test -s "./$OUT_DIR/$IMAGE_FILE"
+    - skopeo copy docker-archive:./$OUT_DIR/$IMAGE_FILE docker://$IMG_SRC --dest-creds=devops:$TOKEN --dest-tls-verify=false
+    - |
+      echo "Image da len registry: $REGISTRY_INTERNAL/$PROJECT/$ISTAG"
+      echo "oc set image deployment/$MODULE $MODULE=$REGISTRY_INTERNAL/$PROJECT/$ISTAG -n $PROJECT"
+      echo "oc rollout status deployment/$MODULE -n $PROJECT"
+
+deploy:set-image:
+  extends:
+    - .deploy
+    - .gate:deploy
+  needs: ["deliver:upload-image"]
+  dependencies: []
+  resource_group: deploy-serve-search-service
+  script:
+    - |
+      CURRENT=$(oc get deployment/$MODULE -n $PROJECT \
+        -o jsonpath="{.spec.template.spec.containers[?(@.name=='$MODULE')].image}" 2>/dev/null || true)
+      if [ -z "$CURRENT" ]; then
+        echo "Khong doc duoc image hien tai cua deployment/$MODULE trong namespace $PROJECT."
+        exit 1
+      fi
+      CURRENT_TAG="${CURRENT##*:}"
+      case "$CURRENT_TAG" in
+        dev-*) echo "Deployment van dung dev; cho phep cap nhat." ;;
+        *)
+          echo "DUNG LAI: Deployment dang tro toi $CURRENT, khong phai dev."
+          echo "Image moi van da len registry: $REGISTRY_INTERNAL/$PROJECT/$ISTAG"
+          exit 1 ;;
+      esac
+    - |
+      FOUND=0
+      for i in $(seq 1 30); do
+        if oc get imagestreamtag "$ISTAG" -n "$PROJECT" >/dev/null 2>&1; then
+          FOUND=1
+          break
+        fi
+        sleep 3
+      done
+      if [ "$FOUND" != 1 ]; then
+        echo "Khong thay $ISTAG trong imagestream sau 90s."
+        exit 1
+      fi
+      oc set image deployment/$MODULE $MODULE=$REGISTRY_INTERNAL/$PROJECT/$ISTAG -n $PROJECT
+    - oc rollout status deployment/$MODULE -n $PROJECT --timeout=600s
+    - oc get pods -n $PROJECT -l app=$MODULE -o wide

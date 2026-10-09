@@ -1,0 +1,40 @@
+# Dockerfile-deploy — build cho OpenShift (namespace genai)
+# Chỉ dùng pip + requirements-deploy.txt (sinh từ uv.lock), không cần uv/hatchling.
+ARG PY_IMAGE=ebit.tpb.vn/python:3.11-slim
+FROM ${PY_IMAGE}
+
+# Nexus index. Override bằng biến CI PIP_INDEX_URL nếu repo yêu cầu credential.
+ARG PIP_INDEX_URL=https://ebit.tpb.vn/nexus/repository/python-hosted/simple/
+ARG PIP_TRUSTED_HOST=ebit.tpb.vn
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/src \
+    HOME=/app \
+    XDG_CACHE_HOME=/tmp \
+    SERVE_SEARCH_LOG_DIRECTORY=/app/logs \
+    TZ=Asia/Ho_Chi_Minh
+
+WORKDIR /app
+
+COPY requirements-deploy.txt ./
+# --retries/--timeout: duong ra Nexus qua ha tang noi bo, thinh thoang dut quang.
+RUN pip install --no-cache-dir --retries 5 --timeout 60 \
+        --index-url "${PIP_INDEX_URL}" \
+        ${PIP_TRUSTED_HOST:+--trusted-host ${PIP_TRUSTED_HOST}} \
+        -r requirements-deploy.txt
+
+COPY src /app/src
+
+# OpenShift restricted-v2 chạy bằng UID ngẫu nhiên thuộc group 0 -> cần g+rwx
+RUN mkdir -p /app/logs \
+ && chmod g+rwx /app /app/logs \
+ && python -c "import uvloop; print('uvloop ok')" \
+ && python -c "from serve_search_service.main import app; print('app ok:', app.title)"
+
+USER 10001
+EXPOSE 8080
+
+CMD ["uvicorn", "serve_search_service.main:app", \
+     "--host", "0.0.0.0", "--port", "8080", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]
