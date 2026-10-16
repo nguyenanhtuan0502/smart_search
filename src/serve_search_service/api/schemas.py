@@ -230,6 +230,16 @@ class SearchOptions(BaseModel):
             "(0.0 to 1.0). Applies only when rerank is used. None disables filtering."
         ),
     )
+    dense_score_threshold: str | None = Field(
+        default_factory=lambda: (
+            None if _settings.default_dense_score_threshold is None
+            else str(_settings.default_dense_score_threshold)
+        ),
+        description=(
+            "Ngưỡng sàn Cosine của Qdrant trước khi Rerank (0.0 to 1.0). "
+            "Nếu điểm dense_score cao nhất < ngưỡng này, coi là query rác và trả về rỗng."
+        ),
+    )
     filter_conditions: list["FilterCondition"] | None = Field(
         default=None,
         description=(
@@ -249,7 +259,7 @@ class SearchOptions(BaseModel):
         ),
     )
 
-    @field_validator("score_threshold")
+    @field_validator("score_threshold", "dense_score_threshold")
     @classmethod
     def validate_score_threshold_string(cls, v: str | None) -> str | None:
         if v is None:
@@ -258,10 +268,10 @@ class SearchOptions(BaseModel):
             value = float(v)
         except ValueError as err:
             raise ValueError(
-                f"score_threshold must be a valid number string, got '{v}'"
+                f"Threshold must be a valid number string, got '{v}'"
             ) from err
         if not (0.0 <= value <= 1.0):
-            raise ValueError(f"score_threshold must be between 0.0 and 1.0, got {value}")
+            raise ValueError(f"Threshold must be between 0.0 and 1.0, got {value}")
         return v
 
     @field_validator("vector_weight", "keyword_weight")
@@ -736,6 +746,24 @@ class HybridSearchRequest(BaseModel):
             "'categoryParentId' field. Documents missing the field are naturally "
             "excluded by Qdrant. Omit/null to disable."
         ),
+    )
+    category_id: str | None = Field(
+        default=None,   
+        alias="categoryId",
+        description=(
+            "Pre-filter: only return documents whose payload 'categoryId' "
+            "matches this value exactly. Mapped to a Qdrant must-filter on the "
+            "'categoryId' field. Documents missing the field are naturally "
+            "excluded by Qdrant. Omit/null to disable."
+        ),
+    )
+    child_categories:list[str] | None = Field(
+        default=None,
+        alias="childCategories",
+        description=("Pre-filter: only return documents whose payload 'childCategories' "
+                     "contains this value. Mapped to a Qdrant should-filter on the "
+                     "'childCategories' field. Documents missing the field are naturally "
+                     "excluded by Qdrant. Omit/null to disable."),
     )
 
     search_options: SearchOptions | None = Field(

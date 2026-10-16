@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+
 from fastapi import APIRouter, Request, status
 
 from ..adapters.qdrant import QdrantClient
@@ -192,6 +193,7 @@ async def api_root(
 def _build_qdrant_filter(
     filter_conditions: list[FilterCondition] | None,
     must_not_conditions: list[FilterCondition] | None = None,
+    prefix_clause:dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Convert FilterCondition lists to Qdrant filter format.
 
@@ -232,6 +234,10 @@ def _build_qdrant_filter(
                     },
                 }
             )
+    if prefix_clause:
+                must_clauses.append(prefix_clause)
+
+
 
     # Build must_not clauses
     must_not_clauses: list[dict[str, Any]] = []
@@ -1178,16 +1184,18 @@ async def api_hybrid_search(
             "category_parent_id pre-filter: categoryParentId=%r",
             category_parent_id,
         )
-
+    prefix_clause =_extract_prefix_clause_from_udf(payload.udf)
     qdrant_filter = (
         _build_qdrant_filter(
             filter_conditions,
             opts.must_not_conditions,
+            prefix_clause=prefix_clause
         )
         if filter_conditions
         else _build_qdrant_filter(
             [],
             opts.must_not_conditions,
+            prefix_clause=prefix_clause
         )
     )
 
@@ -1421,6 +1429,38 @@ async def api_hybrid_search(
         chunk_results,
         opts.must_not_conditions,
     )
+
+    # ========================================================
+    # Step 4a: Pre-rerank Gatekeeper (Filter negative queries)
+    # ========================================================
+    if (
+        opts.dense_score_threshold is not None
+        and chunk_results
+        and not is_identifier_query
+    ):
+        dense_thresh = float(opts.dense_score_threshold)
+        max_dense = max(
+            (
+                float(item.get("dense_score"))
+                for item in chunk_results
+                if item.get("dense_score") is not None
+            ),
+            default=0.0,
+        )
+        if max_dense < dense_thresh:
+            _logger.info(
+                "Gatekeeper: max dense_score=%.4f < threshold=%.4f -> dropped query=%r as negative/out-of-domain",
+                max_dense,
+                dense_thresh,
+                payload.query[:60],
+            )
+            _debug_file_logger.info(
+                "GATEKEEPER TRIGGERED | max_dense_score=%.4f < threshold=%.4f | query=%r -> dropped all chunks",
+                max_dense,
+                dense_thresh,
+                payload.query,
+            )
+            chunk_results = []
 
     # ========================================================
     # Step 4b: Model rerank (cross-encoder on chunks)
@@ -2402,3 +2442,44 @@ async def api_hybrid_search(
         }
 
     return response
+
+def _extract_prefix_clause_from_udf(
+    udf: list[Any] | None,
+) -> dict[str, Any] | None:
+    """Trích xuất tiền tố loại văn bản từ UDF và tạo mệnh đề Qdrant MatchPrefix."""
+    if not udf:
+        return None
+
+    target_keys = {"docmavanban", "loaivanban"}
+    codes: list[str] = []
+
+    for item in udf:
+        key = getattr(item, "key", "") or ""
+        if key.strip().lower() in target_keys:
+            val = getattr(item, "value", None)
+            if isinstance(val, str):
+                cleaned = val.strip().upper()
+                if cleaned and cleaned not in codes:
+                    codes.append(cleaned)
+            elif isinstance(val, list):
+                for v in val:
+                    if isinstance(v, str):
+                        cleaned = v.strip().upper()
+                        if cleaned and cleaned not in codes:
+                            codes.append(cleaned)
+    if "QD" in codes or "QĐ" in codes:
+        for q in ("QD", "QĐ"):
+            if q not in codes:
+                codes.append(q)
+    if not codes:  # Ưu tiên QD/QĐ ở đầu danh sách
+        return None
+
+    if len(codes) == 1:
+        return {"key": "docMaVanBan", "match": {"prefix": codes[0]}}
+
+    return {
+        "should": [
+            {"key": "docMaVanBan", "match": {"prefix": code}}
+            for code in codes
+        ]
+    }

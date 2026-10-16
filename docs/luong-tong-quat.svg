@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 800" width="100%" height="100%" style="background-color: #ffffff; font-family: 'Segoe UI', Arial, sans-serif;">
+  <defs>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="2" dy="3" stdDeviation="3" flood-color="#000000" flood-opacity="0.1"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#455A64"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="550" y="45" text-anchor="middle" font-size="24" font-weight="bold" fill="#1A237E">SƠ ĐỒ LUỒNG XỬ LÝ FILTER TIỀN TỐ VĂN BẢN (MATCH PREFIX)</text>
+  <text x="550" y="70" text-anchor="middle" font-size="14" fill="#546E7A">Tính năng: Lọc loại tài liệu (BM, QT, PL, HD...) trong Search Service qua Qdrant</text>
+
+  <!-- Legend -->
+  <g transform="translate(180, 90)">
+    <rect x="0" y="0" width="150" height="28" rx="6" fill="#E1F5FE" stroke="#0288D1" stroke-width="1.5"/>
+    <text x="75" y="18" text-anchor="middle" font-size="12" font-weight="bold" fill="#01579B">Đầu vào (Input)</text>
+
+    <rect x="180" y="0" width="160" height="28" rx="6" fill="#FFF3E0" stroke="#FB8C00" stroke-width="1.5"/>
+    <text x="260" y="18" text-anchor="middle" font-size="12" font-weight="bold" fill="#E65100">Xử lý (Service Logic)</text>
+
+    <rect x="370" y="0" width="160" height="28" rx="6" fill="#E8F5E9" stroke="#43A047" stroke-width="1.5"/>
+    <text x="450" y="18" text-anchor="middle" font-size="12" font-weight="bold" fill="#1B5E20">Lưu trữ (Qdrant DB)</text>
+
+    <rect x="560" y="0" width="150" height="28" rx="6" fill="#F3E5F5" stroke="#8E24AA" stroke-width="1.5"/>
+    <text x="635" y="18" text-anchor="middle" font-size="12" font-weight="bold" fill="#4A148C">Đầu ra (Output)</text>
+  </g>
+
+  <!-- Flow Nodes -->
+
+  <!-- Node 1: Client Request -->
+  <g transform="translate(70, 150)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#E1F5FE" stroke="#0288D1" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#0288D1"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">1</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#01579B">Client gửi Search Payload</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• query: "Quy trình mở thẻ"</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• filter: docMaVanBan prefix "BM"</text>
+    <text x="20" y="88" font-size="11" font-style="italic" fill="#78909C">Module: HTTP Client / Postman</text>
+  </g>
+
+  <!-- Arrow 1 -> 2 -->
+  <path d="M 330 197 L 410 197" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="370" y="188" text-anchor="middle" font-size="11" fill="#455A64">JSON HTTP</text>
+
+  <!-- Node 2: Validate Schema -->
+  <g transform="translate(420, 150)" filter="url(#shadow)">
+    <rect width="270" height="95" rx="10" fill="#FFF3E0" stroke="#FB8C00" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#FB8C00"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">2</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#E65100">Validate Request DTO</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• Nhận diện match_type = "prefix"</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• Validate key &amp; tiền tố (BM, QT...)</text>
+    <text x="20" y="88" font-size="11" font-weight="bold" fill="#D84315">File: api/schemas.py</text>
+  </g>
+
+  <!-- Arrow 2 -> 3 -->
+  <path d="M 690 197 L 770 197" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="730" y="188" text-anchor="middle" font-size="11" fill="#455A64">Request Model</text>
+
+  <!-- Node 3: Build Filter -->
+  <g transform="translate(780, 150)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#FFF3E0" stroke="#FB8C00" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#FB8C00"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">3</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#E65100">Xây dựng Qdrant Filter</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• Tạo điều kiện MatchPrefix</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• match: {"prefix": "BM"}</text>
+    <text x="20" y="88" font-size="11" font-weight="bold" fill="#D84315">File: api/router.py</text>
+  </g>
+
+  <!-- Arrow 3 -> 4 (Down) -->
+  <path d="M 910 245 L 910 325" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="945" y="285" text-anchor="middle" font-size="11" fill="#455A64">Filter dict</text>
+
+  <!-- Node 4: Embedding Query -->
+  <g transform="translate(780, 335)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#FFF3E0" stroke="#FB8C00" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#FB8C00"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">4</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#E65100">Vector hóa Query text</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• Dense Vector (Qwen3-Embedding)</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• Sparse Vector (BM25 token)</text>
+    <text x="20" y="88" font-size="11" font-weight="bold" fill="#D84315">File: application/embedding.py</text>
+  </g>
+
+  <!-- Arrow 4 -> 5 (Left) -->
+  <path d="M 780 382 L 700 382" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="740" y="373" text-anchor="middle" font-size="11" fill="#455A64">Vectors + Filter</text>
+
+  <!-- Node 5: Qdrant Adapter Search -->
+  <g transform="translate(430, 335)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#E8F5E9" stroke="#43A047" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#43A047"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">5</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#1B5E20">Gửi Search kèm Filter</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• Gửi POST /points/query</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• Mang theo payload filter prefix</text>
+    <text x="20" y="88" font-size="11" font-weight="bold" fill="#2E7D32">File: adapters/qdrant.py</text>
+  </g>
+
+  <!-- Arrow 5 -> 6 (Left) -->
+  <path d="M 430 382 L 340 382" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="385" y="373" text-anchor="middle" font-size="11" fill="#455A64">REST API</text>
+
+  <!-- Node 6: Qdrant Engine Execution -->
+  <g transform="translate(70, 335)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#E8F5E9" stroke="#43A047" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#43A047"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">6</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#1B5E20">Qdrant Lọc MatchPrefix</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• Quét index docMaVanBan</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• Chỉ lấy điểm có bắt đầu là "BM..."</text>
+    <text x="20" y="88" font-size="11" font-style="italic" fill="#2E7D32">Database: Qdrant Vector Store</text>
+  </g>
+
+  <!-- Arrow 6 -> 7 (Down & Right) -->
+  <path d="M 200 430 L 200 560 L 420 560" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="270" y="550" text-anchor="middle" font-size="11" fill="#455A64">Candidates đã lọc</text>
+
+  <!-- Node 7: Document Rerank & Group -->
+  <g transform="translate(430, 515)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#FFF3E0" stroke="#FB8C00" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#FB8C00"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">7</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#E65100">Rerank &amp; Gom nhóm Doc</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• Model Rerank (Qwen3-Reranker)</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• Gom chunks thành danh sách văn bản</text>
+    <text x="20" y="88" font-size="11" font-weight="bold" fill="#D84315">File: application/rerank_service.py</text>
+  </g>
+
+  <!-- Arrow 7 -> 8 (Right) -->
+  <path d="M 690 562 L 770 562" fill="none" stroke="#455A64" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="730" y="553" text-anchor="middle" font-size="11" fill="#455A64">Top Docs</text>
+
+  <!-- Node 8: Final Result Response -->
+  <g transform="translate(780, 515)" filter="url(#shadow)">
+    <rect width="260" height="95" rx="10" fill="#F3E5F5" stroke="#8E24AA" stroke-width="2"/>
+    <circle cx="25" cy="25" r="14" fill="#8E24AA"/>
+    <text x="25" y="30" text-anchor="middle" font-size="13" font-weight="bold" fill="#FFFFFF">8</text>
+    <text x="50" y="28" font-size="15" font-weight="bold" fill="#4A148C">Trả JSON Kết Quả</text>
+    <text x="20" y="55" font-size="12" fill="#37474F">• 100% tài liệu trả về đúng loại</text>
+    <text x="20" y="73" font-size="12" fill="#37474F">• docMaVanBan bắt đầu bằng tiền tố</text>
+    <text x="20" y="88" font-size="11" font-weight="bold" fill="#6A1B9A">File: api/router.py</text>
+  </g>
+
+  <!-- Bottom Summary Box -->
+  <rect x="70" y="660" width="970" height="85" rx="8" fill="#ECEFF1" stroke="#B0BEC5" stroke-width="1.5"/>
+  <text x="90" y="688" font-size="14" font-weight="bold" fill="#263238">TÓM TẮT CỐT LÕI CỦA TÍNH NĂNG:</text>
+  <text x="90" y="710" font-size="13" fill="#37474F">1. Khối 2 &amp; 3 (schemas.py &amp; router.py) cần bổ sung match_type="prefix" để đón nhận các tiền tố như "BM", "QT", "PL"...</text>
+  <text x="90" y="730" font-size="13" fill="#37474F">2. Khối 5 &amp; 6 (Qdrant) thực hiện lọc ngay trong lúc tìm kiếm vector, loại bỏ hoàn toàn các loại văn bản không mong muốn từ đầu nguồn.</text>
+</svg>
+

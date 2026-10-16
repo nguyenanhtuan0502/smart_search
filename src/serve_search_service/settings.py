@@ -51,7 +51,7 @@ class ServiceSettings(BaseSettings):
     # non-English corpora (training instructions were mostly English), and
     # tailored to the task/domain. Overridable via env + per-request.
     default_query_instruction: str = (
-        "Given a web search query, retrieve relevant passages that answer the query"
+        "Given a Vietnamese banking query, retrieve the most relevant internal regulations, procedures, or forms from the document corpus."
     )
 
     # Sparse embedding (BM25, computed in-process)
@@ -89,6 +89,9 @@ class ServiceSettings(BaseSettings):
     default_title_rrf_k: int = 10
     default_title_min_coverage: float = 0.5
     default_score_threshold: float = 0.2
+    # Ngưỡng sàn Cosine trước khi Rerank (None = tắt cổng gác, mặc định 0.35).
+    # Nếu điểm dense_score cao nhất < ngưỡng này, coi là query rác và trả về rỗng.
+    default_dense_score_threshold: float | None = 0.35
     # Regex patterns for identifier shape detection (re.IGNORECASE applied automatically).
     # Override via env to extend/narrow what counts as a doc-code or sohieu.
     # Default values mirror the hardcoded patterns in router_regex.py.
@@ -169,7 +172,7 @@ class ServiceSettings(BaseSettings):
     reranker_qwen3_template: bool = True
     default_model_rerank_top_n: int = 50
     default_rerank_instruction: str = (
-        "Given a web search query, retrieve relevant passages that answer the query"
+        "Given a Vietnamese banking query, determine if the passage is relevant to the query about internal banking regulations, procedures, or forms."
     )
 
     default_citation: bool = True
